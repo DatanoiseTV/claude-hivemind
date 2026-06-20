@@ -20,7 +20,17 @@
 
 const net = require('net');
 const fs = require('fs');
+const path = require('path');
 const C = require('./lib/common');
+const { createProjectWatcher } = require('./lib/watcher');
+
+// Filesystem watching is on by default; HIVEMIND_WATCH=off disables it globally.
+const WATCH_ENABLED = (process.env.HIVEMIND_WATCH || '').toLowerCase() !== 'off';
+const WATCH_IGNORE = (process.env.HIVEMIND_WATCH_IGNORE || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const AGENT_EDIT_DEDUP_MS = 8000; // external change within this of an agent edit = the agent's own
 
 // Limits are sized for large, long-running projects with many cooperating
 // instances. They stay bounded so a runaway producer can't exhaust memory, but
@@ -69,11 +79,14 @@ function getGroup(id, label) {
       barriers: new Map(), // name -> { parties, arrived: Map<agentId, waiter> }
       roles: new Map(), // role -> { by, byName, ts } (leader election)
       recentChanges: [], // { who, file, tool, ts } ring of repo mutations
+      recentAgentEdits: new Map(), // absPath -> ts (to dedup FS events vs agent edits)
       sessionActivity: new Map(), // sessionKey -> { label, ts } (turn awareness)
+      dir: '', // project directory (captured from the first registrant's cwd)
+      watcher: null, // filesystem watcher handle
       taskSeq: 0,
       persistTimer: null,
       // Cumulative counters so the dashboard can derive live rates from deltas.
-      stats: { messages: 0, broadcasts: 0, edits: 0, turns: 0, tasksPosted: 0, peakAgents: 0, createdAt: C.now() },
+      stats: { messages: 0, broadcasts: 0, edits: 0, turns: 0, fsChanges: 0, tasksPosted: 0, peakAgents: 0, createdAt: C.now() },
     };
     groups.set(id, g);
     restoreGroup(g); // rehydrate durable task board + shared context, if any
@@ -408,13 +421,16 @@ const OPS = {
     group.agents.set(agent.id, rec);
     group.stats.peakAgents = Math.max(group.stats.peakAgents, group.agents.size);
     group.inboxes.set(agent.id, group.inboxes.get(agent.id) || []);
+    // Learn the real project directory from the first registrant and begin
+    // watching it for external changes.
+    if (!group.dir && agent.cwd) group.dir = agent.cwd;
+    ensureWatcher(group);
     cs.agentId = agent.id;
     cs.groupId = group.id;
     lastAgentSeenAt = C.now();
 
     // Tell the existing members someone joined.
     broadcastSystem(group, agent.id, `${name} joined the hive`);
-    pumpWaiters(group);
 
     log(`register ${name} (${agent.id}) in ${group.label} [${group.id}] — ${group.agents.size} online`);
     return { self: publicAgent(rec), snapshot: snapshot(group) };
@@ -434,8 +450,6 @@ const OPS = {
     if (a) {
       if (msg.status) a.status = String(msg.status).slice(0, 80);
       a.lastSeen = C.now();
-      const g = groups.get(cs.groupId);
-      if (g) pumpWaiters(g);
     }
     return {};
   },
@@ -742,6 +756,9 @@ const OPS = {
     if (g.recentChanges.length > MAX_CHANGES) {
       g.recentChanges.splice(0, g.recentChanges.length - MAX_CHANGES);
     }
+    // Remember this edit so the FS watcher can distinguish the agent's own write
+    // from a genuinely external change to the same file.
+    g.recentAgentEdits.set(msg.file, C.now());
     g.stats.edits++;
     return {};
   },
@@ -842,19 +859,11 @@ function pushBroadcastFeed(group, fromName, body, kind) {
   }
 }
 
-function broadcastSystem(group, exceptId, body) {
-  for (const a of group.agents.values()) {
-    if (a.id === exceptId) continue;
-    deliver(group, a.id, {
-      id: C.genId('m'),
-      from: 'hub',
-      fromName: 'hive',
-      to: a.id,
-      kind: 'system',
-      body,
-      ts: C.now(),
-    });
-  }
+// System events (joins/leaves) are PASSIVE: they go only to the ambient feed —
+// shown in the per-turn digest and the monitor — and are never delivered to an
+// inbox or used to wake a `wait`. Nothing the hive does automatically rouses an
+// instance; only an explicit peer send/broadcast does.
+function broadcastSystem(group, _exceptId, body) {
   pushBroadcastFeed(group, 'hive', body, 'system');
 }
 
@@ -878,6 +887,76 @@ function pruneTasks(group) {
   group.tasks = [...live, ...trimmed].sort(
     (a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1))
   );
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem watching: be aware of EXTERNAL changes (builds, git, edits made in
+// another editor) without ever invoking an LLM. Events are recorded as passive
+// state and surfaced on a turn the agent was already taking.
+// ---------------------------------------------------------------------------
+
+function ensureWatcher(group) {
+  if (!WATCH_ENABLED || group.watcher || !group.dir) return;
+  let exists = false;
+  try {
+    exists = fs.statSync(group.dir).isDirectory();
+  } catch (_) {
+    exists = false;
+  }
+  if (!exists) return; // e.g. synthetic test groups with no real directory
+  const w = createProjectWatcher(group.dir, {
+    ignore: WATCH_IGNORE,
+    onBatch: (paths, overflow) => handleFsBatch(group, paths, overflow),
+    onError: (err) => {
+      log(`watch disabled for ${group.label}: ${err.message}`);
+      group.watcher = null;
+    },
+  });
+  group.watcher = w;
+  log(`watching ${group.dir} for ${group.label} [${group.id}]`);
+}
+
+function closeWatcher(group) {
+  if (group.watcher) {
+    try {
+      group.watcher.close();
+    } catch (_) {
+      /* ignore */
+    }
+    group.watcher = null;
+  }
+}
+
+function handleFsBatch(group, paths, overflow) {
+  const nowTs = C.now();
+  // Drop changes an agent just made itself (already tracked as edits), so the
+  // FS feed shows only external changes — the genuinely useful signal.
+  for (const [p, ts] of group.recentAgentEdits) {
+    if (nowTs - ts > AGENT_EDIT_DEDUP_MS) group.recentAgentEdits.delete(p);
+  }
+  const external = paths.filter((p) => {
+    const ts = group.recentAgentEdits.get(p);
+    return !(ts && nowTs - ts < AGENT_EDIT_DEDUP_MS);
+  });
+  if (!external.length) return;
+
+  for (const p of external.slice(0, 60)) {
+    group.recentChanges.push({ who: 'filesystem', file: p, tool: 'fs', ts: nowTs });
+  }
+  if (group.recentChanges.length > MAX_CHANGES) {
+    group.recentChanges.splice(0, group.recentChanges.length - MAX_CHANGES);
+  }
+  group.stats.fsChanges += external.length;
+
+  const names = external.slice(0, 4).map((p) => path.basename(p));
+  const extra = external.length - names.length;
+  const body =
+    `${external.length}${overflow ? '+' : ''} file(s) changed externally: ` +
+    `${names.join(', ')}${extra > 0 ? ` (+${extra} more)` : ''}`;
+  // Purely passive: the summary goes to the ambient feed only. Agents see it in
+  // their next-turn digest or via the `changes` tool — never pushed, never waking
+  // anyone, never costing a token until a turn the user already started.
+  pushBroadcastFeed(group, 'filesystem', body, 'fs');
 }
 
 function handleWait(cs, msg) {
@@ -1049,7 +1128,12 @@ function cleanup(cs, reason) {
   }
   if (reopened) schedulePersist(g);
   broadcastSystem(g, cs.agentId, `${a.name} left the hive`);
-  pumpWaiters(g);
+  // Only wake waiting workers if a departure actually reopened work (a pull-side
+  // task event they opted into) — never for the bare presence change.
+  if (reopened) pumpWaiters(g);
+  // No one left to react to changes: stop watching (reopens when an agent
+  // rejoins). Watchers are also a finite OS resource, so don't leak them.
+  if (g.agents.size === 0) closeWatcher(g);
   log(`cleanup ${a.name} (${reason}) — ${g.agents.size} left in ${g.label}`);
 
   // Drop empty groups from memory so it doesn't grow with abandoned projects.

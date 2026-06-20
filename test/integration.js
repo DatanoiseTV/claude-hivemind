@@ -142,6 +142,16 @@ async function main() {
   const scriptTask = (await a.request('task_list')).tasks.find((t) => t.title === 'from a script');
   assert(scriptTask && scriptTask.by === 'cli:bob', 'one-shot CLI participant labels its actions with as');
 
+  // No auto-dispatch: a peer joining/leaving must NOT wake an instance that is
+  // waiting for messages. Only an explicit peer send does.
+  await b.request('inbox'); // clear any pending first
+  const waitNoWake = b.request('wait', { want: ['message'], timeout_ms: 700 }, 3000);
+  const tmp = new PersistentClient({ agent: mkAgent('epsilon'), log: () => {} });
+  await tmp.ensureConnected(); // a join — passive, must not wake b
+  const wr = await waitNoWake;
+  assert(wr.timeout === true, 'a peer joining does not wake a waiting instance (no auto-dispatch)');
+  await tmp.unregister();
+
   // Turn-activity pulse increments the dashboard turns counter.
   const beforeTurns = (await a.request('status', { group: group.id })).groups[0].stats.turns;
   await quickRequest('note_activity', { group: group.id, kind: 'turn', sessionKey: 'sx', label: 'doing things' }, { timeoutMs: 1000 });
