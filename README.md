@@ -160,10 +160,11 @@ hivemind monitor          # builds on first run, then launches the dashboard
 cargo run --release --manifest-path monitor/Cargo.toml
 ```
 
-An animated, live dashboard (~10 fps): every active project hive at once with
-sparkline graphs (activity/sec and edits/sec, globally and per hive), animated
-task-progress gauges, a spinner on every instance currently working, pulsing
-presence dots, and cards that flash cyan the instant their hive does anything.
+A live dashboard: every active project hive at once with scrolling sparkline
+graphs (activity/sec and edits/sec, globally and per hive), task-progress gauges,
+a single rotating spinner on each instance currently working, static neon
+presence dots, and a brief cyan glow on a card the instant its hive does
+anything. Motion is deliberately restrained — no flicker.
 "Activity" includes turns, so an instance that is simply being used shows up even
 when it isn't messaging or editing — and the environment/model of each instance
 is shown, so a mixed Claude/OpenCode/Cursor fleet is legible at a glance. Keys:

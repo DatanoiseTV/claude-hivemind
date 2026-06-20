@@ -11,15 +11,21 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, FLASH_FRAMES};
+use crate::app::App;
 use crate::client::Group;
 
 const MSG_COLOR: Color = Color::Cyan;
 const EDIT_COLOR: Color = Color::Magenta;
 
+// Static neon palette — no animation, so nothing shimmers.
+const NEON_GREEN: Color = Color::Rgb(0, 230, 150); // live / fresh presence
+const AMBER: Color = Color::Rgb(255, 200, 40); // selected / focused
+const GLOW: Color = Color::Rgb(120, 245, 255); // brief flash when a hive acts
+const OFFLINE: Color = Color::Rgb(230, 70, 70);
+
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(8),
+        Constraint::Length(6),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -38,16 +44,11 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "—".into()
     };
-    let p = pulse(app.frame, 16);
-    let border_color = if app.connected {
-        mix((0, 150, 90), (60, 255, 180), p)
-    } else {
-        mix((120, 0, 0), (255, 50, 50), p)
-    };
+    let border_color = if app.connected { NEON_GREEN } else { OFFLINE };
     let live = if app.connected { spinner(app.frame) } else { "○" };
-    let title = format!(" {} HIVEMIND  ⟐  hub up {}  ·  pid {}  ·  proto v{} ", live, up, app.hub_pid, app.hub_protocol);
+    let title = format!(" {} HIVEMIND · hub up {} · pid {} · proto v{} ", live, up, app.hub_pid, app.hub_protocol);
     let block = Block::bordered()
-        .border_type(BorderType::Double)
+        .border_type(BorderType::Plain)
         .border_style(Style::new().fg(border_color))
         .title(Span::styled(title, Style::new().fg(border_color).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
@@ -84,29 +85,29 @@ fn draw_header_stats(f: &mut Frame, area: Rect, app: &App) {
 
     let lines = vec![
         Line::from(vec![
-            Span::styled(format!("{:>3}", hives), Style::new().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" hives    "),
-            Span::styled(format!("{}", instances), Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {}", hives), Style::new().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" hives   "),
+            Span::styled(format!("{}", instances), Style::new().fg(NEON_GREEN).add_modifier(Modifier::BOLD)),
             Span::raw(" instances   "),
             Span::styled(format!("peak {}", peak), Style::new().fg(Color::DarkGray)),
         ]),
         Line::from(vec![
-            Span::raw(format!("{} tasks   ", total_tasks)),
+            Span::raw(format!(" {} tasks   ", total_tasks)),
             Span::styled(format!("{} open", open), Style::new().fg(Color::Cyan)),
             Span::raw("  "),
             Span::styled(format!("{} wip", wip), Style::new().fg(Color::Yellow)),
             Span::raw("  "),
-            Span::styled(format!("{} done", done), Style::new().fg(Color::Green)),
+            Span::styled(format!("{} done", done), Style::new().fg(NEON_GREEN)),
         ]),
         Line::from(vec![
-            Span::styled(format!("{} activity", msgs), Style::new().fg(MSG_COLOR)),
+            Span::styled(format!(" {} activity", msgs), Style::new().fg(MSG_COLOR)),
             Span::raw("   "),
             Span::styled(format!("{} edits", edits), Style::new().fg(EDIT_COLOR)),
         ]),
         Line::from(if app.connected {
-            Span::styled(format!("● {}", app.status_line), Style::new().fg(Color::Green))
+            Span::styled(format!(" ● {}", app.status_line), Style::new().fg(NEON_GREEN))
         } else {
-            Span::styled(format!("○ {}", app.status_line), Style::new().fg(Color::Red))
+            Span::styled(format!(" ○ {}", app.status_line), Style::new().fg(OFFLINE))
         }),
     ];
     f.render_widget(Paragraph::new(lines), area);
@@ -166,7 +167,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(msg)
                 .alignment(Alignment::Center)
                 .style(Style::new().fg(Color::DarkGray))
-                .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(Color::DarkGray))),
+                .block(Block::bordered().border_type(BorderType::Plain).border_style(Style::new().fg(Color::DarkGray))),
             area,
         );
         return;
@@ -202,20 +203,18 @@ fn draw_card(f: &mut Frame, area: Rect, app: &App, idx: usize) {
     let g = &app.groups[idx];
     let selected = idx == app.selected;
     let flash = app.flash.get(&g.group.id).copied().unwrap_or(0);
+    // Solid glow while a hive is active (no fade -> no shimmer), then back to a
+    // static colour. Selected = amber, otherwise gray.
     let border_style = if flash > 0 {
-        // Bright cyan that fades as the flash decays — the card "lights up" the
-        // instant its hive does anything.
-        let t = flash as f32 / FLASH_FRAMES as f32;
-        Style::new().fg(mix((40, 90, 110), (80, 255, 255), t)).add_modifier(Modifier::BOLD)
+        Style::new().fg(GLOW).add_modifier(Modifier::BOLD)
     } else if selected {
-        // Gently pulsing amber so the selection is alive, not static.
-        Style::new().fg(mix((140, 110, 0), (255, 220, 0), pulse(app.frame, 12))).add_modifier(Modifier::BOLD)
+        Style::new().fg(AMBER).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(Color::Gray)
     };
     let title = format!(" {} · {} inst ", trunc(&g.group.label, 22), g.agents.len());
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(border_style)
         .title(Span::styled(title, border_style));
     let inner = block.inner(area);
@@ -229,8 +228,7 @@ fn draw_card(f: &mut Frame, area: Rect, app: &App, idx: usize) {
         Constraint::Length(3), // instances
         Constraint::Length(1), // task gauge
         Constraint::Length(1), // counts
-        Constraint::Length(1), // msg sparkline
-        Constraint::Length(1), // edit sparkline
+        Constraint::Length(1), // activity sparkline
         Constraint::Min(0),    // feed
     ])
     .split(inner);
@@ -239,8 +237,7 @@ fn draw_card(f: &mut Frame, area: Rect, app: &App, idx: usize) {
     draw_task_gauge(f, parts[1], g);
     draw_counts(f, parts[2], g);
     draw_card_spark(f, parts[3], &g.group.id, app, true);
-    draw_card_spark(f, parts[4], &g.group.id, app, false);
-    draw_feed(f, parts[5], g);
+    draw_feed(f, parts[4], g);
 }
 
 fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u64) {
@@ -253,9 +250,9 @@ fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u64) {
         // A spinning marker for instances actively on a task; a softly pulsing
         // green dot for fresh presence; amber/red as it goes stale.
         let (dot, dot_color) = if working {
-            (spinner(frame).to_string(), Color::Yellow)
+            (spinner(frame).to_string(), AMBER)
         } else if age < 20_000 {
-            ("●".to_string(), mix((0, 110, 0), (90, 255, 90), pulse(frame, 20)))
+            ("●".to_string(), NEON_GREEN)
         } else if age < 60_000 {
             ("●".to_string(), Color::Yellow)
         } else {
@@ -394,11 +391,10 @@ fn draw_focus(f: &mut Frame, area: Rect, app: &App) {
         g.agents.len(),
         g.tasks.len()
     );
-    let accent = mix((150, 120, 0), (255, 225, 60), pulse(app.frame, 16));
     let block = Block::bordered()
-        .border_type(BorderType::Double)
-        .border_style(Style::new().fg(accent).add_modifier(Modifier::BOLD))
-        .title(Span::styled(title, Style::new().fg(accent).add_modifier(Modifier::BOLD)));
+        .border_type(BorderType::Plain)
+        .border_style(Style::new().fg(AMBER).add_modifier(Modifier::BOLD))
+        .title(Span::styled(title, Style::new().fg(AMBER).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -427,9 +423,9 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u
         let age = now - a.last_seen;
         let working = a.current_task.is_some();
         let (dot, dot_color) = if working {
-            (format!("{} ", spinner(frame)), Color::Yellow)
+            (format!("{} ", spinner(frame)), AMBER)
         } else if age < 20_000 {
-            ("● ".to_string(), mix((0, 110, 0), (90, 255, 90), pulse(frame, 20)))
+            ("● ".to_string(), NEON_GREEN)
         } else if age < 60_000 {
             ("● ".to_string(), Color::Yellow)
         } else {
@@ -601,30 +597,18 @@ fn path_tail(p: &str, n: usize) -> String {
 }
 
 // --- animation helpers ------------------------------------------------------
+//
+// Motion is deliberately restrained to avoid flicker: a single rotating spinner
+// where work is actually happening, and a brief *solid* glow on a card the
+// moment its hive does something. No per-frame colour fades (those re-tint every
+// border cell each frame and shimmer); colours are otherwise static.
 
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// A gentle spinner that advances ~3x/sec (every ~3rd frame at 10fps) so it reads
+// as a smooth rotation rather than a frantic blur.
+const SPINNER: [&str; 8] = ["◐", "◓", "◑", "◒", "◐", "◓", "◑", "◒"];
 
 fn spinner(frame: u64) -> &'static str {
-    SPINNER[(frame as usize) % SPINNER.len()]
-}
-
-/// Triangle wave in [0,1] with the given period in frames.
-fn pulse(frame: u64, period: u64) -> f32 {
-    let p = (frame % period) as f32 / period as f32;
-    if p < 0.5 {
-        p * 2.0
-    } else {
-        2.0 - p * 2.0
-    }
-}
-
-fn lerp(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
-}
-
-/// Interpolate between two RGB colors by t in [0,1].
-fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> Color {
-    Color::Rgb(lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
+    SPINNER[((frame / 3) as usize) % SPINNER.len()]
 }
 
 fn fmt_dur(ms: i64) -> String {
@@ -727,10 +711,30 @@ mod tests {
         }
     }
 
+    // Dev tool: `cargo test preview -- --ignored --nocapture` prints the real
+    // rendered dashboard as text, so the README mockup can be checked against it.
+    #[test]
+    #[ignore]
+    fn preview() {
+        let (w, h) = (96usize, 30usize);
+        let app = fake_app();
+        let mut terminal = Terminal::new(TestBackend::new(w as u16, h as u16)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::from("\n");
+        for y in 0..h {
+            for x in 0..w {
+                out.push_str(buf.content[y * w + x].symbol());
+            }
+            out.push('\n');
+        }
+        eprintln!("{}", out);
+    }
+
     #[test]
     fn animation_frames_render_without_panic() {
         let mut app = fake_app();
-        app.flash.insert("g1".into(), FLASH_FRAMES);
+        app.flash.insert("g1".into(), crate::app::FLASH_FRAMES);
         // Advance through a full spinner/pulse cycle in both views.
         for i in 0..40 {
             app.animate();
