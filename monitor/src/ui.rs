@@ -526,9 +526,14 @@ fn draw_focus_changes(f: &mut Frame, area: Rect, g: &Group, now: i64) {
     let take = inner.height as usize;
     let mut lines: Vec<Line> = Vec::new();
     for c in g.changes.iter().rev().take(take).rev() {
+        // External (filesystem-watched) changes get an "ext" tag so they stand
+        // out from edits agents made themselves.
+        let external = c.tool == "fs" || c.who == "filesystem";
+        let (tag, tag_color) = if external { ("ext ", AMBER) } else { ("    ", Color::DarkGray) };
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", fmt_dur(now - c.ts)), Style::new().fg(Color::DarkGray)),
-            Span::styled(path_tail(&c.file, inner.width.saturating_sub(10) as usize), Style::new().fg(Color::Gray)),
+            Span::styled(format!("{:>4} ", fmt_dur(now - c.ts)), Style::new().fg(Color::DarkGray)),
+            Span::styled(tag, Style::new().fg(tag_color)),
+            Span::styled(path_tail(&c.file, inner.width.saturating_sub(14) as usize), Style::new().fg(Color::Gray)),
         ]));
     }
     if lines.is_empty() {
