@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-06-20
+
+### Fixed
+
+- **Idle instances now auto-rejoin after a hub restart.** Previously a persistent
+  client cleared its heartbeat on disconnect and only reconnected on the next
+  hive tool call, so an idle session went missing from the hive (and its presence
+  was lost) until the agent next used a hive tool. The client now keeps a
+  lifetime ticker that reconnects and re-registers on its own within a heartbeat,
+  so presence survives a hub restart even while idle.
+
 ## [0.5.0] — 2026-06-20
 
 Subagents can collaborate with each other.

@@ -172,17 +172,25 @@ class PersistentClient {
     this.log(`connected to hive as ${this.agent.name} (${this.agent.id})`);
   }
 
+  // A single lifetime ticker (idempotent). While connected it heartbeats; while
+  // disconnected it reconnects. This is what lets an idle instance rejoin the
+  // hive on its own after the hub restarts — presence isn't lost just because
+  // the agent isn't actively calling hive tools.
   _startHeartbeat() {
-    clearInterval(this.heartbeatTimer);
+    if (this.heartbeatTimer) return;
     this.heartbeatTimer = setInterval(() => {
-      this._raw('heartbeat', {}, 4000).catch(() => {});
+      if (this.closed) return;
+      if (this.connected) {
+        this._raw('heartbeat', {}, 4000).catch(() => {});
+      } else {
+        this.ensureConnected().catch(() => {});
+      }
     }, this.heartbeatMs);
     if (this.heartbeatTimer.unref) this.heartbeatTimer.unref();
   }
 
   _onClose() {
     this.connected = false;
-    clearInterval(this.heartbeatTimer);
     // Fail every in-flight request so callers don't hang.
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
@@ -190,7 +198,12 @@ class PersistentClient {
     }
     this.pending.clear();
     if (this.closed) return;
-    this.log('hub connection lost; will reconnect on next request');
+    this.log('hub connection lost; reconnecting');
+    // Kick a fast reconnect; the lifetime ticker is the backstop. (The ticker is
+    // intentionally NOT cleared here, so reconnection continues while idle.)
+    setTimeout(() => {
+      if (!this.closed && !this.connected) this.ensureConnected().catch(() => {});
+    }, 500);
   }
 
   _onMessage(obj) {
