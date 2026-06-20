@@ -1,0 +1,14 @@
+{
+  "name": "hivemind",
+  "owner": {
+    "name": "DatanoiseTV",
+    "url": "https://github.com/DatanoiseTV"
+  },
+  "plugins": [
+    {
+      "name": "hivemind",
+      "source": ".",
+      "description": "Let multiple Claude Code instances in the same project collaborate as one hive in real time."
+    }
+  ]
+}
