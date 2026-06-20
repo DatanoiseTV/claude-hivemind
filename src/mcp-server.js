@@ -15,9 +15,10 @@
 
 const C = require('./lib/common');
 const { PersistentClient } = require('./lib/hub-client');
+const { detectInputChannel, inject } = require('./lib/inject');
 
 const SERVER_NAME = 'hivemind';
-const SERVER_VERSION = '0.5.1';
+const SERVER_VERSION = '0.6.0';
 const DEFAULT_PROTOCOL = '2025-06-18';
 
 function logErr(msg) {
@@ -52,6 +53,10 @@ const agent = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
+  // Opt-in remote control: only set when HIVEMIND_ALLOW_DISPATCH=1, this makes
+  // the instance addressable by `dispatch` (a peer can type a prompt into its
+  // window). Null = not remote-controllable.
+  inputChannel: detectInputChannel(),
 };
 
 const client = new PersistentClient({ agent, log: logErr });
@@ -76,7 +81,8 @@ function fmtPeers(peers) {
       const envStr = env ? ` (${env})` : '';
       const caps = p.capabilities && p.capabilities.length ? ` {${p.capabilities.join(',')}}` : '';
       const doing = p.currentTask ? ` — working on ${p.currentTask}` : p.status && p.status !== 'idle' ? ` [${p.status}]` : '';
-      return `- ${p.name}${envStr}${caps}${doing} (seen ${ageStr(p.lastSeen)})`;
+      const disp = p.dispatchable ? ' [dispatchable]' : '';
+      return `- ${p.name}${envStr}${caps}${doing}${disp} (seen ${ageStr(p.lastSeen)})`;
     })
     .join('\n');
 }
@@ -484,6 +490,35 @@ const TOOLS = [
           `Task board:\n${fmtTasks(snap.tasks)}\n\n` +
           `Shared context:\n${notes}\n\n` +
           `Locks:\n${locks}`
+      );
+    },
+  },
+  {
+    name: 'dispatch',
+    description:
+      'Actively drive another instance: type a prompt into its terminal window and (by default) press Enter, so it runs a turn. This is real remote control — it will spend the target\'s tokens and may make it take actions, with no human typing on that side. Only works on instances that opted in by starting with HIVEMIND_ALLOW_DISPATCH=1 (they show as "[dispatchable]" in peers). Use deliberately and never in a loop; prefer send/broadcast for ordinary coordination.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Target instance name (must be dispatchable).' },
+        prompt: { type: 'string', description: 'The prompt text to type into the target window.' },
+        submit: { type: 'boolean', description: 'Press Enter to submit (default true). Set false to type without sending.' },
+      },
+      required: ['to', 'prompt'],
+      additionalProperties: false,
+    },
+    async handler(args) {
+      const r = await client.request('get_channel', { to: args.to });
+      if (!r.found) return text(`No instance named "${args.to}" in this hive.`);
+      if (r.self) return text('Refusing to dispatch to yourself.');
+      if (!r.channel) {
+        return text(`"${r.name}" is not remote-controllable. It must be started with HIVEMIND_ALLOW_DISPATCH=1 to accept dispatch.`);
+      }
+      const res = await inject(r.channel, args.prompt, args.submit !== false);
+      if (!res.ok) return text(`Dispatch to ${r.name} failed: ${res.error}`);
+      return text(
+        `Dispatched to ${r.name} via ${res.via}: typed "${args.prompt}"` +
+          (args.submit === false ? ' (no Enter — left in their input box).' : ' and pressed Enter.')
       );
     },
   },

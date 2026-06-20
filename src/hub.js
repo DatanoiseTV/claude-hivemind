@@ -183,6 +183,7 @@ function publicAgent(a) {
     status: a.status,
     capabilities: a.capabilities || [],
     currentTask: a.currentTask || null,
+    dispatchable: !!a.inputChannel,
     joinedAt: a.joinedAt,
     lastSeen: a.lastSeen,
   };
@@ -453,6 +454,7 @@ const OPS = {
       client: (agent.client || '').slice(0, 40),
       model: (agent.model || '').slice(0, 60),
       status: 'idle',
+      inputChannel: agent.inputChannel || null, // set => remote-controllable via dispatch
       capabilities: Array.isArray(agent.capabilities) ? agent.capabilities.slice(0, 32) : [],
       currentTask: null,
       joinedAt: C.now(),
@@ -514,6 +516,18 @@ const OPS = {
   peers(msg, cs) {
     const g = requireGroup(msg, cs);
     return { peers: peersOf(g, cs.agentId), participants: activeMailboxes(g, msg.as) };
+  },
+
+  // Resolve a target's terminal input channel for `dispatch`. Returns the raw
+  // channel only when the target opted in (registered one). Same-user machine,
+  // so exposing the channel to a peer is fine; the consent gate is the target
+  // having set HIVEMIND_ALLOW_DISPATCH=1.
+  get_channel(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const target = findAgent(g, msg.to);
+    if (!target) return { found: false };
+    if (target.id === cs.agentId) return { found: true, self: true, name: target.name };
+    return { found: true, self: false, name: target.name, channel: target.inputChannel || null };
   },
 
   send(msg, cs) {

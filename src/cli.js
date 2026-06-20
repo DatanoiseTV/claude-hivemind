@@ -218,6 +218,21 @@ async function cmdRecall() {
   for (const n of r.notes) console.log(`${n.key}${n.summary ? `  — ${n.summary}` : ''}`);
 }
 
+async function cmdDispatch() {
+  const to = process.argv[3];
+  const prompt = rest(4);
+  if (!to || !prompt) return console.log('usage: hivemind dispatch <target> <prompt>');
+  const c = ctx();
+  const r = await quickRequest('get_channel', { group: c.group, groupLabel: c.groupLabel, to }, { timeoutMs: 1500 });
+  if (!r || !r.ok) return offline();
+  if (!r.found) return console.log(`No instance named "${to}" in this hive.`);
+  if (r.self) return console.log('Refusing to dispatch to yourself.');
+  if (!r.channel) return console.log(`"${r.name}" is not dispatchable (start it with HIVEMIND_ALLOW_DISPATCH=1).`);
+  const { inject } = require('./lib/inject');
+  const res = await inject(r.channel, prompt, true);
+  console.log(res.ok ? `Dispatched to ${r.name} via ${res.via}.` : `Dispatch failed: ${res.error}`);
+}
+
 async function cmdChanges() {
   const c = ctx();
   const r = await quickRequest('list_changes', { group: c.group, groupLabel: c.groupLabel }, { timeoutMs: 1500 });
@@ -244,6 +259,7 @@ const table = {
   share: cmdShare,
   recall: cmdRecall,
   changes: cmdChanges,
+  dispatch: cmdDispatch,
 };
 const usage =
   'usage: hivemind <command>\n' +
@@ -260,5 +276,6 @@ const usage =
   '  broadcast <msg>         message the whole hive\n' +
   '  share <key> <value>     publish shared context\n' +
   '  recall [key]            read shared context\n' +
-  '  changes                 recent file edits in the hive';
+  '  changes                 recent file edits in the hive\n' +
+  '  dispatch <to> <prompt>  type a prompt into a dispatchable instance and press Enter';
 (table[cmd] || (() => console.log(usage)))();
