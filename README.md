@@ -208,6 +208,34 @@ task becoming available to a worker that *opted in* by calling `wait` — and th
 worker is already mid-turn, so it costs no extra tokens. Work is pulled
 (`task_next`), never pushed.
 
+## Actively driving another instance (`dispatch`)
+
+Normally the hive never types into or prompts another instance. `dispatch` is the
+one deliberate exception: it types a prompt into another instance's terminal
+window and presses Enter, so that instance runs a turn — useful for an
+orchestrator instance that hands real work to worker windows.
+
+Because this is real remote control (it spends the target's tokens and can make
+it take actions with no human on that side), it is gated:
+
+- A window is only controllable if started with **`HIVEMIND_ALLOW_DISPATCH=1`**.
+  It then shows as `[dispatchable]` in `peers` and `⌨` in the monitor.
+- Dispatch is always explicit — an agent or you invoke it; nothing fires
+  automatically, and an instance can't dispatch to itself.
+- Works with **iTerm2** (macOS) and **tmux** panes. On macOS the first dispatch
+  asks once for Automation permission to control iTerm.
+
+```
+# enable a window to be driven (start its Claude Code like this):
+HIVEMIND_ALLOW_DISPATCH=1 claude
+
+# from another instance, via the dispatch tool, or the CLI:
+hivemind dispatch worker-2 "implement the login form and run the tests"
+```
+
+Use it deliberately, never in a loop. For ordinary coordination prefer
+`send`/`broadcast` and the task board, which are passive and don't rouse anyone.
+
 ## Configuration
 
 Environment variables (set them for a session):
@@ -216,6 +244,7 @@ Environment variables (set them for a session):
 - `HIVEMIND_MODEL` / `HIVEMIND_CLIENT` — label this instance's model and IDE.
 - `HIVEMIND_CAPS` — capability tags (e.g. `rust,frontend`) for task routing.
 - `HIVEMIND_PROJECT_DIR` — override the project root (which hive you join).
+- `HIVEMIND_ALLOW_DISPATCH=1` — make this window remote-controllable via `dispatch`.
 - `HIVEMIND_WATCH=off` — disable filesystem watching.
 - `HIVEMIND_WATCH_IGNORE` — extra comma-separated path fragments to ignore.
 - `HIVEMIND_EDIT_GUARD=off` — disable the concurrent-edit `ask` prompt.

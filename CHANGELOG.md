@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-06-20
+
+### Added
+
+- **`dispatch` — actively drive another instance.** Type a prompt into another
+  instance's terminal window and press Enter, so it runs a turn. Supports iTerm2
+  sessions (macOS) and tmux panes. This is the deliberate exception to the
+  otherwise no-auto-dispatch model, so it is gated hard:
+  - **Opt-in target.** A window is only controllable if it was started with
+    `HIVEMIND_ALLOW_DISPATCH=1` (which is what makes it register an input
+    channel). It shows as `[dispatchable]` in `peers` and `⌨` in the monitor.
+  - **Explicit action.** Nothing dispatches automatically; an agent or human
+    invokes it on purpose. Refuses to dispatch to yourself.
+  - It is real remote control: it spends the target's tokens and may make it take
+    actions with no human typing on that side. Use deliberately, not in loops.
+  - Exposed as the `dispatch` MCP tool and `hivemind dispatch <to> <prompt>`. On
+    macOS, the first dispatch prompts once for Automation permission to control
+    iTerm.
+
 ## [0.5.1] — 2026-06-20
 
 ### Fixed
