@@ -60,6 +60,8 @@ pub struct Group {
     #[serde(default)]
     pub roles: Vec<Role>,
     #[serde(default)]
+    pub participants: Vec<Participant>,
+    #[serde(default)]
     pub activity: Vec<Activity>,
     #[serde(default)]
     pub changes: Vec<Change>,
@@ -149,6 +151,15 @@ pub struct Role {
     pub role: String,
     #[serde(default)]
     pub holder: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Participant {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub pending: u64,
 }
 
 #[allow(dead_code)]

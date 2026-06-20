@@ -447,6 +447,18 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u
             Span::styled(format!("  ({})", fmt_dur(now - a.last_seen)), Style::new().fg(Color::DarkGray)),
         ]));
     }
+    // Named participants (subagents) sharing a session — lightweight, no socket.
+    for p in &g.participants {
+        lines.push(Line::from(vec![
+            Span::styled("⊹ ", Style::new().fg(MSG_COLOR)),
+            Span::styled(format!("{:<16}", trunc(&p.name, 16)), Style::new().fg(MSG_COLOR)),
+            Span::styled(" subagent", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                if p.pending > 0 { format!("  {} pending", p.pending) } else { String::new() },
+                Style::new().fg(AMBER),
+            ),
+        ]));
+    }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled("(no instances)", Style::new().fg(Color::DarkGray))));
     }
@@ -633,7 +645,7 @@ fn fmt_dur(ms: i64) -> String {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::client::{Agent, Group, GroupRef, Activity, Stats, Task};
+    use crate::client::{Agent, Group, GroupRef, Activity, Participant, Stats, Task};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -657,6 +669,7 @@ mod tests {
             Task { id: "t3".into(), title: "tests".into(), status: "claimed".into(), claimed_by: Some("keen-lynx".into()), tags: vec!["rust".into()], ..Default::default() },
             Task { id: "t4".into(), title: "ready work".into(), status: "open".into(), ready: true, ..Default::default() },
         ];
+        g.participants = vec![Participant { name: "sub-frontend".into(), pending: 1 }];
         g.activity = vec![Activity { from_name: "swift-otter".into(), body: "claimed t3".into(), kind: "task".into(), ts: 1_000_000 }];
         g.changes = vec![crate::client::Change { who: "supercode:ab".into(), file: "/tmp/supercode/src/hub.js".into(), tool: "Edit".into(), ts: 999_000 }];
         g.stats = Stats { messages: 10, broadcasts: 3, edits: 5, turns: 7, tasks_posted: 4, peak_agents: 2 };
