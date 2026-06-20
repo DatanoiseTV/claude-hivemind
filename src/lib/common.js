@@ -66,6 +66,14 @@ function cursorPath(sessionId) {
   return path.join(stateDir(), `cursor-${safe}.json`);
 }
 
+// Where a group's durable state (task board + shared context) is snapshotted so
+// a hub restart doesn't lose the plan. Presence/messages/locks are ephemeral
+// and intentionally not persisted.
+function groupStatePath(groupId) {
+  const safe = String(groupId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(stateDir(), `group-${safe}.json`);
+}
+
 // ---------------------------------------------------------------------------
 // Project / group resolution
 // ---------------------------------------------------------------------------
@@ -181,6 +189,7 @@ module.exports = {
   socketPath,
   hubLogPath,
   cursorPath,
+  groupStatePath,
   gitToplevel,
   resolveProjectDir,
   groupFor,

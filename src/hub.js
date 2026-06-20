@@ -37,6 +37,7 @@ const DEFAULT_LOCK_TTL_MS = 15 * 60 * 1000;
 const MAX_LOCK_TTL_MS = 4 * 60 * 60 * 1000;
 const MAX_WAIT_MS = 5 * 60 * 1000; // longest a single long-poll may block
 const MAX_BARRIER_MS = 60 * 60 * 1000; // longest a barrier may hold
+const PERSIST_DEBOUNCE_MS = 1500; // coalesce durable-state writes
 
 function log(msg) {
   process.stderr.write(`[hub ${new Date().toISOString()}] ${msg}\n`);
@@ -68,14 +69,81 @@ function getGroup(id, label) {
       barriers: new Map(), // name -> { parties, arrived: Map<agentId, waiter> }
       roles: new Map(), // role -> { by, byName, ts } (leader election)
       recentChanges: [], // { who, file, tool, ts } ring of repo mutations
+      sessionActivity: new Map(), // sessionKey -> { label, ts } (turn awareness)
       taskSeq: 0,
+      persistTimer: null,
       // Cumulative counters so the dashboard can derive live rates from deltas.
-      stats: { messages: 0, broadcasts: 0, edits: 0, tasksPosted: 0, peakAgents: 0, createdAt: C.now() },
+      stats: { messages: 0, broadcasts: 0, edits: 0, turns: 0, tasksPosted: 0, peakAgents: 0, createdAt: C.now() },
     };
     groups.set(id, g);
+    restoreGroup(g); // rehydrate durable task board + shared context, if any
   }
   if (label) g.label = label;
   return g;
+}
+
+// ---------------------------------------------------------------------------
+// Durable state: the task board and shared-context blackboard survive a hub
+// restart (crash, idle-exit, machine reboot). Everything else is ephemeral.
+// ---------------------------------------------------------------------------
+
+function schedulePersist(group) {
+  if (group.persistTimer) return;
+  group.persistTimer = setTimeout(() => {
+    group.persistTimer = null;
+    persistNow(group);
+  }, PERSIST_DEBOUNCE_MS);
+  if (group.persistTimer.unref) group.persistTimer.unref();
+}
+
+function persistNow(group) {
+  const data = {
+    v: 1,
+    label: group.label,
+    taskSeq: group.taskSeq,
+    tasks: group.tasks,
+    notes: [...group.notes.entries()],
+    stats: group.stats,
+    savedAt: C.now(),
+  };
+  // Async + atomic (tmp then rename) so a disk write never blocks the hub's
+  // single-threaded event loop — message throughput is unaffected by persistence.
+  const p = C.groupStatePath(group.id);
+  const tmp = `${p}.${process.pid}.tmp`;
+  fs.writeFile(tmp, JSON.stringify(data), { mode: 0o600 }, (err) => {
+    if (err) {
+      log(`persist write failed for ${group.id}: ${err.message}`);
+      return;
+    }
+    fs.rename(tmp, p, (err2) => {
+      if (err2) log(`persist rename failed for ${group.id}: ${err2.message}`);
+    });
+  });
+}
+
+function restoreGroup(group) {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(C.groupStatePath(group.id), 'utf8'));
+  } catch (_) {
+    return; // nothing saved yet
+  }
+  if (!data || data.v !== 1) return;
+  group.label = data.label || group.label;
+  group.taskSeq = data.taskSeq || 0;
+  group.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  // In-flight work owned by agents that are now gone (the hub just restarted)
+  // is reopened so a fresh fleet can pick it back up.
+  for (const t of group.tasks) {
+    if (t.status === 'claimed' || t.status === 'in_progress') {
+      t.status = 'open';
+      t.claimedBy = null;
+      (t.log = t.log || []).push({ ts: C.now(), by: 'hive', note: 'reopened (hub restart)' });
+    }
+  }
+  for (const [k, v] of data.notes || []) group.notes.set(k, v);
+  if (data.stats) group.stats = { ...group.stats, ...data.stats, peakAgents: 0 };
+  log(`restored ${group.tasks.length} task(s) and ${group.notes.size} note(s) for ${group.label} [${group.id}]`);
 }
 
 function totalAgents() {
@@ -96,9 +164,88 @@ function publicAgent(a) {
     pid: a.pid,
     model: a.model,
     status: a.status,
+    capabilities: a.capabilities || [],
+    currentTask: a.currentTask || null,
     joinedAt: a.joinedAt,
     lastSeen: a.lastSeen,
   };
+}
+
+// A task is "ready" when it is open and every dependency it names has reached a
+// terminal-good state (done). This is what turns a flat list into a dependency
+// graph: workers only ever claim ready work, so phases naturally serialize while
+// independent work runs in parallel.
+function unmetDeps(group, task) {
+  if (!task.deps || !task.deps.length) return [];
+  const byId = new Map(group.tasks.map((t) => [t.id, t]));
+  return task.deps.filter((d) => {
+    const dep = byId.get(d);
+    return !dep || dep.status !== 'done';
+  });
+}
+
+function taskReady(group, task) {
+  return task.status === 'open' && unmetDeps(group, task).length === 0;
+}
+
+// Annotate tasks for the wire with derived fields the clients render.
+function publicTasks(group) {
+  return group.tasks.map((t) => ({
+    ...t,
+    ready: taskReady(group, t),
+    blockedBy: t.status === 'open' ? unmetDeps(group, t) : [],
+  }));
+}
+
+// Pick the best ready task for a claimer: prefer ones whose tags match the
+// claimer's capabilities, then higher priority, then oldest. Returns null if no
+// ready task exists.
+function bestReadyTask(group, capabilities) {
+  const caps = new Set(capabilities || []);
+  const ready = group.tasks.filter((t) => taskReady(group, t));
+  if (!ready.length) return null;
+  const score = (t) => {
+    const tags = t.tags || [];
+    const match = tags.length && tags.some((tag) => caps.has(tag)) ? 1 : 0;
+    return { match, priority: t.priority || 0, seq: Number(t.id.slice(1)) || 0 };
+  };
+  ready.sort((a, b) => {
+    const sa = score(a);
+    const sb = score(b);
+    if (sb.match !== sa.match) return sb.match - sa.match;
+    if (sb.priority !== sa.priority) return sb.priority - sa.priority;
+    return sa.seq - sb.seq;
+  });
+  return ready[0];
+}
+
+// Shared by task_claim and task_next. Atomic (single-threaded hub): the open
+// check-and-set cannot race, so exactly one claimer wins a task.
+function claimTask(g, cs, taskId) {
+  const a = currentAgent(cs);
+  const who = a ? a.name : cs.agentId;
+  const task = g.tasks.find((t) => t.id === taskId);
+  if (!task) throw new Error(`no task ${taskId}`);
+  if (task.status !== 'open') {
+    throw new Error(`task ${task.id} is ${task.status} (owner ${task.claimedBy || '-'})`);
+  }
+  const unmet = unmetDeps(g, task);
+  if (unmet.length) {
+    throw new Error(`task ${task.id} is blocked by unfinished deps: ${unmet.join(', ')}`);
+  }
+  task.status = 'claimed';
+  task.claimedBy = who;
+  task.updatedAt = C.now();
+  task.log.push({ ts: C.now(), by: who, note: 'claimed' });
+  // Auto-presence: peers and the dashboard now see what this instance is on.
+  if (a) {
+    a.currentTask = task.id;
+    a.status = `on ${task.id}: ${task.title.slice(0, 40)}`;
+  }
+  pushBroadcastFeed(g, who, `claimed task ${task.id}: ${task.title}`, 'task');
+  schedulePersist(g);
+  pumpWaiters(g);
+  return { task: { ...task, ready: false } };
 }
 
 function peersOf(group, exceptId) {
@@ -122,7 +269,7 @@ function snapshot(group) {
   return {
     group: { id: group.id, label: group.label },
     agents: [...group.agents.values()].map(publicAgent),
-    tasks: group.tasks,
+    tasks: publicTasks(group),
     notes: publicNotes(group),
     locks: [...group.locks.entries()].map(([resource, l]) => ({
       resource,
@@ -154,9 +301,11 @@ function evalWait(group, w) {
     }
   }
   if (w.want.has('task')) {
-    const open = group.tasks.filter((t) => t.status === 'open');
-    if (open.length) {
-      result.tasks = open;
+    // Only wake a worker when there is *ready* work (dependencies satisfied),
+    // so it doesn't spin on blocked tasks.
+    const ready = group.tasks.filter((t) => taskReady(group, t));
+    if (ready.length) {
+      result.tasks = ready.map((t) => ({ ...t, ready: true }));
       hit = true;
     }
   }
@@ -237,7 +386,9 @@ const OPS = {
       cwd: agent.cwd || '',
       pid: agent.pid || 0,
       model: agent.model || '',
-      status: 'active',
+      status: 'idle',
+      capabilities: Array.isArray(agent.capabilities) ? agent.capabilities.slice(0, 32) : [],
+      currentTask: null,
       joinedAt: C.now(),
       lastSeen: C.now(),
       connId: cs.id,
@@ -361,6 +512,7 @@ const OPS = {
       ts: C.now(),
     });
     pushBroadcastFeed(g, a ? a.name : cs.agentId, `shared context "${msg.key}"`, 'context');
+    schedulePersist(g);
     pumpWaiters(g);
     return { key: msg.key };
   },
@@ -389,11 +541,16 @@ const OPS = {
     const g = requireGroup(msg, cs);
     const a = currentAgent(cs);
     if (!msg.title) throw new Error('task_post requires title');
+    const known = new Set(g.tasks.map((t) => t.id));
+    const deps = Array.isArray(msg.deps) ? msg.deps.filter((d) => known.has(d)) : [];
     const task = {
       id: `t${++g.taskSeq}`,
       title: String(msg.title).slice(0, 1000),
       detail: msg.detail || '',
       status: 'open', // open | claimed | in_progress | done | failed
+      priority: Number(msg.priority) || 0,
+      tags: Array.isArray(msg.tags) ? msg.tags.slice(0, 16).map(String) : [],
+      deps,
       by: a ? a.name : cs.agentId,
       claimedBy: null,
       createdAt: C.now(),
@@ -403,34 +560,38 @@ const OPS = {
     g.tasks.push(task);
     g.stats.tasksPosted++;
     pruneTasks(g);
-    pushBroadcastFeed(g, task.by, `posted task ${task.id}: ${task.title}`, 'task');
+    const depNote = deps.length ? ` (after ${deps.join(', ')})` : '';
+    pushBroadcastFeed(g, task.by, `posted task ${task.id}: ${task.title}${depNote}`, 'task');
+    schedulePersist(g);
     pumpWaiters(g);
-    return { task };
+    return { task: { ...task, ready: taskReady(g, task), blockedBy: unmetDeps(g, task) } };
   },
 
   task_list(msg, cs) {
     const g = requireGroup(msg, cs);
-    return { tasks: g.tasks };
+    return { tasks: publicTasks(g) };
   },
 
   task_claim(msg, cs) {
     const g = requireGroup(msg, cs);
-    const a = currentAgent(cs);
-    const who = a ? a.name : cs.agentId;
-    const task = g.tasks.find((t) => t.id === msg.task_id);
-    if (!task) throw new Error(`no task ${msg.task_id}`);
-    // Atomic claim: the hub is single-threaded, so this check-and-set cannot
-    // race. Two agents claiming the same open task -> exactly one wins.
-    if (task.status !== 'open') {
-      throw new Error(`task ${task.id} is ${task.status} (claimed by ${task.claimedBy || '-'})`);
+    if (!msg.task_id) {
+      // No id given -> behave like task_next (smart pick).
+      const a = currentAgent(cs);
+      const pick = bestReadyTask(g, a ? a.capabilities : []);
+      if (!pick) return { task: null, reason: 'no ready task available' };
+      return claimTask(g, cs, pick.id);
     }
-    task.status = 'claimed';
-    task.claimedBy = who;
-    task.updatedAt = C.now();
-    task.log.push({ ts: C.now(), by: who, note: 'claimed' });
-    pushBroadcastFeed(g, who, `claimed task ${task.id}: ${task.title}`, 'task');
-    pumpWaiters(g);
-    return { task };
+    return claimTask(g, cs, msg.task_id);
+  },
+
+  // Smart claim: atomically grab the best ready task for this instance (highest
+  // priority, capability-matched, oldest). One call replaces list+pick+claim.
+  task_next(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    const pick = bestReadyTask(g, a ? a.capabilities : []);
+    if (!pick) return { task: null, reason: 'no ready task available' };
+    return claimTask(g, cs, pick.id);
   },
 
   task_update(msg, cs) {
@@ -446,14 +607,20 @@ const OPS = {
     if (msg.status) {
       task.status = msg.status;
       if (msg.status === 'open') task.claimedBy = null;
+      // Auto-presence: clear the worker's "current task" when it finishes.
+      if ((msg.status === 'done' || msg.status === 'failed') && a && a.currentTask === task.id) {
+        a.currentTask = null;
+        a.status = 'idle';
+      }
     }
     task.updatedAt = C.now();
     if (msg.note || msg.status) {
       task.log.push({ ts: C.now(), by: who, note: msg.note || `-> ${msg.status}` });
     }
     pushBroadcastFeed(g, who, `task ${task.id} ${task.status}${msg.note ? `: ${msg.note}` : ''}`, 'task');
-    pumpWaiters(g);
-    return { task };
+    schedulePersist(g);
+    pumpWaiters(g); // a completed dep may unblock other tasks -> wake workers
+    return { task: { ...task, ready: taskReady(g, task) } };
   },
 
   // Advisory locks -----------------------------------------------------------
@@ -504,6 +671,23 @@ const OPS = {
     }
     g.editIntents.set(file, { sessionKey: msg.sessionKey, who: msg.who || 'a peer', ts: nowTs });
     return { conflict };
+  },
+
+  // Turn/activity pulse from hooks. Lets the hive (and dashboard) reflect that
+  // instances are actively being used even when they aren't calling hive tools
+  // or editing files — a turn is a unit of "this instance just did work".
+  note_activity(msg, cs) {
+    const g = getGroup(msg.group, msg.groupLabel);
+    if (msg.kind === 'turn') g.stats.turns++;
+    if (msg.sessionKey) {
+      g.sessionActivity.set(msg.sessionKey, { label: msg.label || '', ts: C.now() });
+      // Keep the session-activity map from growing without bound.
+      if (g.sessionActivity.size > 256) {
+        const oldest = [...g.sessionActivity.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+        if (oldest) g.sessionActivity.delete(oldest[0]);
+      }
+    }
+    return {};
   },
 
   // Leader election ----------------------------------------------------------
@@ -844,20 +1028,28 @@ function cleanup(cs, reason) {
     }
   }
   // Reopen any work it had claimed but not finished, so a peer can take over.
+  let reopened = false;
   for (const t of g.tasks) {
     if (t.claimedBy === a.name && (t.status === 'claimed' || t.status === 'in_progress')) {
       t.status = 'open';
       t.claimedBy = null;
       t.updatedAt = C.now();
       t.log.push({ ts: C.now(), by: 'hive', note: `reopened (${a.name} left)` });
+      reopened = true;
     }
   }
+  if (reopened) schedulePersist(g);
   broadcastSystem(g, cs.agentId, `${a.name} left the hive`);
   pumpWaiters(g);
   log(`cleanup ${a.name} (${reason}) — ${g.agents.size} left in ${g.label}`);
 
-  // Drop empty groups so memory doesn't grow with abandoned projects.
+  // Drop empty groups from memory so it doesn't grow with abandoned projects.
+  // Durable state stays on disk and rehydrates if the group comes back.
   if (g.agents.size === 0 && g.tasks.length === 0 && g.notes.size === 0) {
+    if (g.persistTimer) {
+      clearTimeout(g.persistTimer);
+      persistNow(g);
+    }
     groups.delete(g.id);
   }
   if (totalAgents() === 0) lastAgentSeenAt = C.now();
