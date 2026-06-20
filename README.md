@@ -3,11 +3,18 @@
 [![CI](https://github.com/DatanoiseTV/claude-hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/DatanoiseTV/claude-hivemind/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 
-A Claude Code plugin that lets **multiple Claude Code instances working in the
+A Claude Code plugin that lets **multiple coding-agent instances working in the
 same project talk to each other in real time** and collaborate as one hive:
-shared presence, messaging, a shared-context blackboard, a work-stealing task
-board, advisory file locks, leader election, and lockstep barriers — all
-isolated per project, plus a terminal dashboard that shows every hive at once.
+shared presence, messaging, a dependency-aware task board, a shared-context
+blackboard, advisory file locks, leader election, and lockstep barriers — all
+isolated per project, plus a live animated terminal dashboard that shows every
+hive at once.
+
+It is **not Claude-only**: the bundled MCP server is a universal adapter, so
+OpenCode, Cursor, Cline, Zed, Windsurf — any MCP-capable IDE — can join the same
+per-project hive, each running a different model. Run a fast cheap model on
+mechanical tasks and a strong model on the hard ones, all coordinating over one
+board. See [INTEGRATIONS.md](INTEGRATIONS.md).
 
 ```
 ┌─ HIVEMIND · hub up 12m · pid 4831 · proto v1 ───────────────────────────────┐
@@ -153,15 +160,17 @@ hivemind monitor          # builds on first run, then launches the dashboard
 cargo run --release --manifest-path monitor/Cargo.toml
 ```
 
-Shows every active project hive simultaneously with live sparkline graphs
-(activity/sec and edits/sec, globally and per hive), task-progress gauges,
-per-instance presence (with current task), a per-hive activity feed, and
-aggregate stats. "Activity" includes turns, so an instance that is simply being
-used shows up even when it isn't messaging or editing. Keys: `↑↓`/`jk` select a
-hive, **`Enter` to focus** a hive (full-screen detail: every instance with
-capabilities + current task, the whole board with ready/blocked state and
-dependencies, the feed, and recent file edits), `b` broadcast to the selected
-hive as an operator, `p` pause, `q` quit.
+An animated, live dashboard (~10 fps): every active project hive at once with
+sparkline graphs (activity/sec and edits/sec, globally and per hive), animated
+task-progress gauges, a spinner on every instance currently working, pulsing
+presence dots, and cards that flash cyan the instant their hive does anything.
+"Activity" includes turns, so an instance that is simply being used shows up even
+when it isn't messaging or editing — and the environment/model of each instance
+is shown, so a mixed Claude/OpenCode/Cursor fleet is legible at a glance. Keys:
+`↑↓`/`jk` select a hive, **`Enter` to focus** a hive (full-screen detail: every
+instance with capabilities + current task, the whole board with ready/blocked
+state and dependencies, the feed, and recent file edits), `b` broadcast to the
+selected hive as an operator, `p` pause, `q` quit.
 
 No-build fallbacks (pure Node):
 

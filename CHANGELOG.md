@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-06-20
+
+Opened the hive to any IDE/model and made the dashboard come alive.
+
+### Added
+
+- **Cross-IDE / cross-model collaboration.** The MCP server is a universal
+  adapter: OpenCode, Cursor, Cline, Zed, Windsurf — any MCP-capable tool — can
+  join the same per-project hive as Claude Code, each running a different model.
+  Project-dir resolution is IDE-agnostic (`HIVEMIND_PROJECT_DIR` override). Each
+  instance carries its environment (`HIVEMIND_CLIENT`) and model
+  (`HIVEMIND_MODEL`), shown on presence and the dashboard. See
+  [INTEGRATIONS.md](INTEGRATIONS.md).
+- **CLI coordination ops** so non-MCP environments and scripts can participate in
+  the task board, messaging, and shared context: `hivemind peers | tasks |
+  task-next | task-post | task-done | send | broadcast | share | recall |
+  changes`. One-shot actors name themselves via `as`.
+- **Animated, futuristic monitor** (~10 fps): pulsing neon header with a live
+  spinner, a spinner on every instance currently working, softly pulsing presence
+  dots, a pulsing selection border, and cards that flash cyan the instant their
+  hive does anything. Instance lines show the environment/model so a mixed fleet
+  is legible at a glance.
+
 ## [0.2.0] — 2026-06-20
 
 Made the hive smarter, more self-aware, and durable.
