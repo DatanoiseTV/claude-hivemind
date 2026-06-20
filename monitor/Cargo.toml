@@ -1,0 +1,19 @@
+[package]
+name = "hivemind-monitor"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal dashboard (ratatui) for the Claude Code Hivemind hub — shows every project hive at once with live graphs."
+license = "MIT"
+
+[[bin]]
+name = "hivemind-monitor"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
