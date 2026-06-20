@@ -168,7 +168,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
 
     let n = app.groups.len();
     let cols = ((area.width as usize) / 46).clamp(1, n.max(1)).min(n);
-    let rows = (n + cols - 1) / cols;
+    let rows = n.div_ceil(cols);
 
     let row_constraints: Vec<Constraint> = (0..rows).map(|_| Constraint::Ratio(1, rows as u32)).collect();
     let row_areas = Layout::default()

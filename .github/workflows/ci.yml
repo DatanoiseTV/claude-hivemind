@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  node:
+    name: Node engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Engine + MCP + durability tests
+        run: npm test
+      - name: Throughput benchmark (smoke)
+        run: node test/throughput.js 5000
+
+  monitor:
+    name: ratatui monitor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: monitor
+      - name: Build
+        run: cargo build --release --manifest-path monitor/Cargo.toml
+      - name: Test
+        run: cargo test --release --manifest-path monitor/Cargo.toml
+      - name: Lint (clippy, warnings = errors)
+        run: cargo clippy --manifest-path monitor/Cargo.toml --release -- -D warnings
