@@ -183,11 +183,33 @@ hivemind stop        # shut the hub down
 hivemind where       # socket / log paths
 ```
 
+## Awareness without token waste
+
+The hub watches each active project for **external** changes — a build, a `git
+pull`, a file you edited in another editor — debounced and filtered (ignores
+`node_modules`, `.git`, build output, logs) and deduped against agents' own
+edits. Crucially it **never invokes an LLM**: changes are recorded as passive
+state and shown in the per-turn digest and the `changes` tool, so awareness costs
+nothing until a turn you already started.
+
+This is part of a deliberate **no-auto-dispatch** design: nothing the hive does
+automatically prompts or rouses an instance. Idle instances are never started.
+System events and filesystem changes are passive (ambient feed only). The only
+things that can wake an instance are an explicit peer `send`/`broadcast`, or a
+task becoming available to a worker that *opted in* by calling `wait` — and that
+worker is already mid-turn, so it costs no extra tokens. Work is pulled
+(`task_next`), never pushed.
+
 ## Configuration
 
-Environment variables (set them for a Claude session):
+Environment variables (set them for a session):
 
 - `HIVEMIND_NAME` — give this instance a fixed name instead of a random one.
+- `HIVEMIND_MODEL` / `HIVEMIND_CLIENT` — label this instance's model and IDE.
+- `HIVEMIND_CAPS` — capability tags (e.g. `rust,frontend`) for task routing.
+- `HIVEMIND_PROJECT_DIR` — override the project root (which hive you join).
+- `HIVEMIND_WATCH=off` — disable filesystem watching.
+- `HIVEMIND_WATCH_IGNORE` — extra comma-separated path fragments to ignore.
 - `HIVEMIND_EDIT_GUARD=off` — disable the concurrent-edit `ask` prompt.
 
 ## Safety & isolation

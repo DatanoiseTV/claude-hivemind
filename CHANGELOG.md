@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-06-20
+
+Filesystem awareness, and an explicit no-auto-dispatch guarantee.
+
+### Added
+
+- **Filesystem watching.** The hub watches each active project for changes,
+  debounced (a save-all/build/git-checkout collapses into one event) and filtered
+  (ignores `node_modules`, `.git`, build output, logs, temp files). It dedups an
+  agent's own edits, so the feed shows only **external** changes (a build, a git
+  pull, you editing in another editor) — the genuinely useful signal. It **never
+  invokes an LLM**: changes are recorded as passive state and surface in the
+  per-turn digest and the `changes` tool, so awareness costs no tokens until a
+  turn you already started. Disable with `HIVEMIND_WATCH=off`; extend the ignore
+  list with `HIVEMIND_WATCH_IGNORE`.
+
+### Changed
+
+- **No auto-dispatch.** Nothing the hive does automatically rouses or prompts an
+  instance. System events (joins/leaves) and filesystem changes are now passive
+  (ambient feed only) — they never land in an inbox or wake a `wait`. Only an
+  explicit peer `send`/`broadcast`, or a task becoming available to a worker that
+  opted in via `wait`, can wake an instance. Idle instances are never prompted.
+
 ## [0.3.0] — 2026-06-20
 
 Opened the hive to any IDE/model and made the dashboard come alive.
