@@ -92,6 +92,50 @@ async function main() {
   ]);
   assert(br1.released && br2.released, 'barrier releases when all parties arrive');
 
+  // Dependency-gated task board.
+  const tA = (await a.request('task_post', { title: 'design', priority: 5 })).task;
+  const tB = (await a.request('task_post', { title: 'build', deps: [tA.id] })).task;
+  assert(tA.ready === true, 'task with no deps is ready');
+  assert(tB.ready === false && tB.blockedBy.includes(tA.id), 'task with unmet dep is blocked');
+  let blocked = false;
+  try {
+    await b.request('task_claim', { task_id: tB.id });
+  } catch (_) {
+    blocked = true;
+  }
+  assert(blocked, 'claiming a blocked task is rejected');
+
+  // task_next picks the best READY task (design), not the blocked one.
+  const next = await b.request('task_next');
+  assert(next.task && next.task.id === tA.id, 'task_next claims the ready, highest-priority task');
+
+  // Completing the dependency unblocks the dependent task.
+  await b.request('task_update', { task_id: tA.id, status: 'done' });
+  const list = (await a.request('task_list')).tasks;
+  const buildNow = list.find((t) => t.id === tB.id);
+  assert(buildNow.ready === true, 'dependent task becomes ready once its dep is done');
+
+  // Auto-presence: claiming set beta's current task; finishing cleared it.
+  const peersAfter = (await a.request('peers')).peers;
+  const beta = peersAfter.find((p) => p.name === 'beta');
+  assert(beta && beta.currentTask === null, 'auto-presence cleared after task completion');
+
+  // Capability routing: tagged task goes to the capable instance first.
+  await a.request('task_post', { title: 'rust work', tags: ['rust'] });
+  await a.request('task_post', { title: 'ui work', tags: ['frontend'] });
+  // beta registered without caps; give a fresh capable agent.
+  const ccap = new PersistentClient({ agent: { ...mkAgent('gamma'), capabilities: ['rust'] }, log: () => {} });
+  await ccap.ensureConnected();
+  const gnext = await ccap.request('task_next');
+  assert(gnext.task && gnext.task.title === 'rust work', 'capability-matched task routed to capable instance');
+  await ccap.unregister();
+
+  // Turn-activity pulse increments the dashboard turns counter.
+  const beforeTurns = (await a.request('status', { group: group.id })).groups[0].stats.turns;
+  await quickRequest('note_activity', { group: group.id, kind: 'turn', sessionKey: 'sx', label: 'doing things' }, { timeoutMs: 1000 });
+  const afterTurns = (await a.request('status', { group: group.id })).groups[0].stats.turns;
+  assert(afterTurns === beforeTurns + 1, 'note_activity bumps the turns counter');
+
   await quickRequest('record_change', { group: group.id, who: 'sess1', file: 'x.js', tool: 'Edit' }, { timeoutMs: 1000 });
   r = await a.request('list_changes');
   assert(r.changes.some((c) => c.file === 'x.js'), 'recorded change appears in feed');

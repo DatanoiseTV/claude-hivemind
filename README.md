@@ -125,13 +125,22 @@ A typical fleet workflow:
 ### The hive tools (exposed to the agent over MCP)
 
 Presence & messaging: `whoami`, `peers`, `send`, `broadcast`, `inbox`, `wait`.
-Shared context: `share`, `recall`. Task board: `task_post`, `task_list`,
-`task_claim`, `task_update`. Collision control: `lock`, `unlock`, `elect`,
-`release_role`. Sync: `barrier`. Awareness: `changes`, `status`.
+Shared context: `share`, `recall`. Task board: `task_post` (with `deps`,
+`priority`, `tags`), `task_list`, `task_next`, `task_claim`, `task_update`.
+Collision control: `lock`, `unlock`, `elect`, `release_role`. Sync: `barrier`.
+Awareness: `changes`, `status`.
 
 `wait` is the real-time primitive: an instance blocks on it and returns the
-instant a relevant event arrives (a message, or an open task for a worker), so
+instant a relevant event arrives (a message, or a *ready* task for a worker), so
 instances synchronize like a real team rather than polling.
+
+**The task board is a dependency graph, not a flat list.** A task with `deps`
+only becomes claimable once those dependencies are `done`, so a whole plan can be
+posted at once and the hive will naturally serialize phases while running
+independent work in parallel. `task_next` atomically claims the best *ready* task
+for an instance — highest priority, matched to its capabilities — so a worker
+loop is one call. Completing a task auto-unblocks its dependents and wakes any
+waiting workers.
 
 ## The monitor
 
@@ -142,10 +151,14 @@ cargo run --release --manifest-path monitor/Cargo.toml
 ```
 
 Shows every active project hive simultaneously with live sparkline graphs
-(messages/sec and edits/sec, globally and per hive), task-progress gauges,
-per-instance presence, a per-hive activity feed, and aggregate stats. Keys:
-`↑↓`/`jk` select a hive, `b` broadcast to the selected hive as an operator,
-`p` pause, `q` quit.
+(activity/sec and edits/sec, globally and per hive), task-progress gauges,
+per-instance presence (with current task), a per-hive activity feed, and
+aggregate stats. "Activity" includes turns, so an instance that is simply being
+used shows up even when it isn't messaging or editing. Keys: `↑↓`/`jk` select a
+hive, **`Enter` to focus** a hive (full-screen detail: every instance with
+capabilities + current task, the whole board with ready/blocked state and
+dependencies, the feed, and recent file edits), `b` broadcast to the selected
+hive as an operator, `p` pause, `q` quit.
 
 No-build fallbacks (pure Node):
 
@@ -176,16 +189,29 @@ Environment variables (set them for a Claude session):
   long-running projects), so a runaway producer cannot exhaust memory; the hub
   prunes oldest completed tasks first and never drops live work.
 
+## Performance
+
+The hub is a single-threaded Node daemon over a Unix domain socket — local IPC,
+no network stack. Measured on a developer Mac (`npm run bench`):
+
+- **~150,000 messages/sec** sustained, lossless (with a live consumer draining).
+- **~0.04 ms** median round-trip latency (p99 ~0.23 ms).
+
+Messaging is never the bottleneck; the limit on "messages per second" in
+practice is how fast the agents themselves choose to talk. Durable-state writes
+are async and atomic, so persistence never stalls the message loop.
+
 ## Development
 
 ```
-npm test                 # Node engine (20 checks) + MCP stdio (9 checks)
+npm test                 # engine (28 checks) + MCP stdio (9) + durability (4)
+npm run bench            # throughput / latency benchmark
 npm run test:engine
-npm run test:mcp
-cargo test --manifest-path monitor/Cargo.toml   # ratatui render tests
+cargo test --manifest-path monitor/Cargo.toml   # ratatui render tests (5)
 ```
 
-Hub log: `~/.claude/hivemind/hub.log`. Socket path: `hivemind where`.
+Hub log: `~/.claude/hivemind/hub.log`. Socket path: `hivemind where`. Durable
+state: `~/.claude/hivemind/group-*.json`.
 
 ## License
 
