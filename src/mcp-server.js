@@ -17,7 +17,7 @@ const C = require('./lib/common');
 const { PersistentClient } = require('./lib/hub-client');
 
 const SERVER_NAME = 'hivemind';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 const DEFAULT_PROTOCOL = '2025-06-18';
 
 function logErr(msg) {
@@ -26,8 +26,17 @@ function logErr(msg) {
 
 // --- Identity ---------------------------------------------------------------
 
-const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+// Project dir resolution is IDE-agnostic: HIVEMIND_PROJECT_DIR (any tool) wins,
+// then CLAUDE_PROJECT_DIR (Claude Code sets this), else cwd. Two instances in
+// the same git work-tree join the same hive no matter which IDE launched them.
+const projectDir = process.env.HIVEMIND_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const group = C.groupFor(projectDir);
+
+// Which coding environment this instance is — so a mixed fleet (Claude Code +
+// OpenCode + Cursor + ...) is legible, and you can see which model is where.
+const clientName =
+  process.env.HIVEMIND_CLIENT || (process.env.CLAUDE_PROJECT_DIR ? 'claude-code' : 'mcp');
+
 const agent = {
   id: C.genId('a'),
   name: process.env.HIVEMIND_NAME || C.randomName(),
@@ -35,6 +44,7 @@ const agent = {
   groupLabel: group.label,
   cwd: group.dir,
   pid: process.pid,
+  client: clientName,
   model: process.env.HIVEMIND_MODEL || '',
   // Optional capability tags (e.g. "rust,frontend,tests") so the task board can
   // route work to the instance best suited for it.
@@ -62,9 +72,11 @@ function fmtPeers(peers) {
   if (!peers || !peers.length) return 'No other instances are in this hive right now.';
   return peers
     .map((p) => {
+      const env = [p.client, p.model].filter(Boolean).join('/');
+      const envStr = env ? ` (${env})` : '';
       const caps = p.capabilities && p.capabilities.length ? ` {${p.capabilities.join(',')}}` : '';
       const doing = p.currentTask ? ` — working on ${p.currentTask}` : p.status && p.status !== 'idle' ? ` [${p.status}]` : '';
-      return `- ${p.name}${caps}${doing} — ${p.cwd || '?'} (seen ${ageStr(p.lastSeen)})`;
+      return `- ${p.name}${envStr}${caps}${doing} (seen ${ageStr(p.lastSeen)})`;
     })
     .join('\n');
 }

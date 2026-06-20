@@ -130,6 +130,18 @@ async function main() {
   assert(gnext.task && gnext.task.title === 'rust work', 'capability-matched task routed to capable instance');
   await ccap.unregister();
 
+  // Cross-IDE identity: a different environment/model surfaces on presence.
+  const oc = new PersistentClient({ agent: { ...mkAgent('delta'), client: 'opencode', model: 'gpt-5' }, log: () => {} });
+  await oc.ensureConnected();
+  const dp = (await a.request('peers')).peers.find((p) => p.name === 'delta');
+  assert(dp && dp.client === 'opencode' && dp.model === 'gpt-5', 'client/model surface on presence (mixed-IDE fleet)');
+  await oc.unregister();
+
+  // A non-MCP one-shot participant (a script/other tool) names its actions via `as`.
+  await quickRequest('task_post', { group: group.id, as: 'cli:bob', title: 'from a script' }, { timeoutMs: 1000 });
+  const scriptTask = (await a.request('task_list')).tasks.find((t) => t.title === 'from a script');
+  assert(scriptTask && scriptTask.by === 'cli:bob', 'one-shot CLI participant labels its actions with as');
+
   // Turn-activity pulse increments the dashboard turns counter.
   const beforeTurns = (await a.request('status', { group: group.id })).groups[0].stats.turns;
   await quickRequest('note_activity', { group: group.id, kind: 'turn', sessionKey: 'sx', label: 'doing things' }, { timeoutMs: 1000 });

@@ -162,6 +162,7 @@ function publicAgent(a) {
     name: a.name,
     cwd: a.cwd,
     pid: a.pid,
+    client: a.client || '',
     model: a.model,
     status: a.status,
     capabilities: a.capabilities || [],
@@ -169,6 +170,16 @@ function publicAgent(a) {
     joinedAt: a.joinedAt,
     lastSeen: a.lastSeen,
   };
+}
+
+// The acting party's display name for an op: a registered agent's name, else an
+// explicit `as` label (used by one-shot CLI participants from other IDEs/scripts
+// that aren't full hive members), else the bare connection id.
+function actorName(msg, cs) {
+  const a = currentAgent(cs);
+  if (a) return a.name;
+  if (msg && msg.as) return String(msg.as).slice(0, 60);
+  return cs.agentId || 'anon';
 }
 
 // A task is "ready" when it is open and every dependency it names has reached a
@@ -221,9 +232,9 @@ function bestReadyTask(group, capabilities) {
 
 // Shared by task_claim and task_next. Atomic (single-threaded hub): the open
 // check-and-set cannot race, so exactly one claimer wins a task.
-function claimTask(g, cs, taskId) {
+function claimTask(g, cs, taskId, asName) {
   const a = currentAgent(cs);
-  const who = a ? a.name : cs.agentId;
+  const who = a ? a.name : asName || cs.agentId;
   const task = g.tasks.find((t) => t.id === taskId);
   if (!task) throw new Error(`no task ${taskId}`);
   if (task.status !== 'open') {
@@ -385,7 +396,8 @@ const OPS = {
       name,
       cwd: agent.cwd || '',
       pid: agent.pid || 0,
-      model: agent.model || '',
+      client: (agent.client || '').slice(0, 40),
+      model: (agent.model || '').slice(0, 60),
       status: 'idle',
       capabilities: Array.isArray(agent.capabilities) ? agent.capabilities.slice(0, 32) : [],
       currentTask: null,
@@ -450,13 +462,12 @@ const OPS = {
 
   send(msg, cs) {
     const g = requireGroup(msg, cs);
-    const from = currentAgent(cs);
     const target = findAgent(g, msg.to);
     if (!target) throw new Error(`no peer "${msg.to}" in this hive`);
     const message = {
       id: C.genId('m'),
       from: cs.agentId,
-      fromName: from ? from.name : cs.agentId,
+      fromName: actorName(msg, cs),
       to: target.id,
       kind: msg.kind || 'chat',
       body: msg.body,
@@ -470,8 +481,7 @@ const OPS = {
 
   broadcast(msg, cs) {
     const g = requireGroup(msg, cs);
-    const from = currentAgent(cs);
-    const fromName = from ? from.name : cs.agentId;
+    const fromName = actorName(msg, cs);
     let n = 0;
     for (const a of g.agents.values()) {
       if (a.id === cs.agentId) continue;
@@ -502,16 +512,16 @@ const OPS = {
   // Shared context blackboard ------------------------------------------------
   share(msg, cs) {
     const g = requireGroup(msg, cs);
-    const a = currentAgent(cs);
     if (!msg.key) throw new Error('share requires key');
+    const who = actorName(msg, cs);
     g.notes.set(msg.key, {
       value: msg.value,
       summary: msg.summary || '',
       by: cs.agentId,
-      byName: a ? a.name : cs.agentId,
+      byName: who,
       ts: C.now(),
     });
-    pushBroadcastFeed(g, a ? a.name : cs.agentId, `shared context "${msg.key}"`, 'context');
+    pushBroadcastFeed(g, who, `shared context "${msg.key}"`, 'context');
     schedulePersist(g);
     pumpWaiters(g);
     return { key: msg.key };
@@ -539,7 +549,6 @@ const OPS = {
   // Task board ---------------------------------------------------------------
   task_post(msg, cs) {
     const g = requireGroup(msg, cs);
-    const a = currentAgent(cs);
     if (!msg.title) throw new Error('task_post requires title');
     const known = new Set(g.tasks.map((t) => t.id));
     const deps = Array.isArray(msg.deps) ? msg.deps.filter((d) => known.has(d)) : [];
@@ -551,7 +560,7 @@ const OPS = {
       priority: Number(msg.priority) || 0,
       tags: Array.isArray(msg.tags) ? msg.tags.slice(0, 16).map(String) : [],
       deps,
-      by: a ? a.name : cs.agentId,
+      by: actorName(msg, cs),
       claimedBy: null,
       createdAt: C.now(),
       updatedAt: C.now(),
@@ -577,11 +586,11 @@ const OPS = {
     if (!msg.task_id) {
       // No id given -> behave like task_next (smart pick).
       const a = currentAgent(cs);
-      const pick = bestReadyTask(g, a ? a.capabilities : []);
+      const pick = bestReadyTask(g, a ? a.capabilities : msg.capabilities || []);
       if (!pick) return { task: null, reason: 'no ready task available' };
-      return claimTask(g, cs, pick.id);
+      return claimTask(g, cs, pick.id, msg.as);
     }
-    return claimTask(g, cs, msg.task_id);
+    return claimTask(g, cs, msg.task_id, msg.as);
   },
 
   // Smart claim: atomically grab the best ready task for this instance (highest
@@ -589,15 +598,15 @@ const OPS = {
   task_next(msg, cs) {
     const g = requireGroup(msg, cs);
     const a = currentAgent(cs);
-    const pick = bestReadyTask(g, a ? a.capabilities : []);
+    const pick = bestReadyTask(g, a ? a.capabilities : msg.capabilities || []);
     if (!pick) return { task: null, reason: 'no ready task available' };
-    return claimTask(g, cs, pick.id);
+    return claimTask(g, cs, pick.id, msg.as);
   },
 
   task_update(msg, cs) {
     const g = requireGroup(msg, cs);
     const a = currentAgent(cs);
-    const who = a ? a.name : cs.agentId;
+    const who = actorName(msg, cs);
     const task = g.tasks.find((t) => t.id === msg.task_id);
     if (!task) throw new Error(`no task ${msg.task_id}`);
     const valid = ['open', 'claimed', 'in_progress', 'done', 'failed'];
