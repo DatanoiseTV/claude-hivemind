@@ -61,7 +61,21 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()>
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('q') => break,
+                        // Esc backs out of focus; quits from the grid.
+                        KeyCode::Esc => {
+                            if app.focused {
+                                app.focused = false;
+                            } else {
+                                break;
+                            }
+                        }
+                        // Enter drills into the selected hive; Esc/Enter toggles back.
+                        KeyCode::Enter => {
+                            if !app.groups.is_empty() {
+                                app.focused = !app.focused;
+                            }
+                        }
                         KeyCode::Down | KeyCode::Char('j') => app.select_next(),
                         KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
                         KeyCode::Right | KeyCode::Char('l') => app.select_next(),

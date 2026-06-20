@@ -72,7 +72,7 @@ fn draw_header_stats(f: &mut Frame, area: Rect, app: &App) {
                 _ => {}
             }
         }
-        msgs += g.stats.messages + g.stats.broadcasts;
+        msgs += g.stats.messages + g.stats.broadcasts + g.stats.turns;
         edits += g.stats.edits;
     }
 
@@ -93,7 +93,7 @@ fn draw_header_stats(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("{} done", done), Style::new().fg(Color::Green)),
         ]),
         Line::from(vec![
-            Span::styled(format!("{} msgs", msgs), Style::new().fg(MSG_COLOR)),
+            Span::styled(format!("{} activity", msgs), Style::new().fg(MSG_COLOR)),
             Span::raw("   "),
             Span::styled(format!("{} edits", edits), Style::new().fg(EDIT_COLOR)),
         ]),
@@ -108,7 +108,7 @@ fn draw_header_stats(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_header_graphs(f: &mut Frame, area: Rect, app: &App) {
     let rows = Layout::vertical([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).split(area);
-    spark_with_label(f, rows[0], "msgs/s", &app.global_msg, MSG_COLOR);
+    spark_with_label(f, rows[0], "actv/s", &app.global_msg, MSG_COLOR);
     spark_with_label(f, rows[1], "edits/s", &app.global_edit, EDIT_COLOR);
 }
 
@@ -146,6 +146,10 @@ fn spark_with_label(
 // --- Body grid --------------------------------------------------------------
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
+    if app.focused && !app.groups.is_empty() {
+        draw_focus(f, area, app);
+        return;
+    }
     if app.groups.is_empty() {
         let msg = if app.connected {
             "No active hives.\nStart Claude Code in a project that has the hivemind plugin enabled."
@@ -239,16 +243,18 @@ fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64) {
         } else {
             Color::Red
         };
-        let status = if a.status.is_empty() || a.status == "active" {
-            String::new()
+        // Prefer showing the current task; fall back to a non-idle status.
+        let (doing, doing_color) = if let Some(t) = &a.current_task {
+            (format!(" ▶{}", t), Color::Yellow)
+        } else if a.status.is_empty() || a.status == "idle" || a.status == "active" {
+            (String::new(), Color::DarkGray)
         } else {
-            format!(" {}", trunc(&a.status, 14))
+            (format!(" {}", trunc(&a.status, 16)), Color::DarkGray)
         };
         lines.push(Line::from(vec![
             Span::styled("● ", Style::new().fg(dot_color)),
-            Span::styled(trunc(&a.name, 14), Style::new().fg(Color::White)),
-            Span::styled(status, Style::new().fg(Color::DarkGray)),
-            Span::styled(format!("  {}", path_tail(&a.cwd, 16)), Style::new().fg(Color::DarkGray)),
+            Span::styled(trunc(&a.name, 13), Style::new().fg(Color::White)),
+            Span::styled(doing, Style::new().fg(doing_color)),
         ]));
     }
     if g.agents.len() > show {
@@ -283,27 +289,32 @@ fn draw_task_gauge(f: &mut Frame, area: Rect, g: &Group) {
 }
 
 fn draw_counts(f: &mut Frame, area: Rect, g: &Group) {
-    let mut open = 0;
+    let mut ready = 0;
+    let mut blocked = 0;
     let mut wip = 0;
     let mut done = 0;
-    let mut fail = 0;
     for t in &g.tasks {
         match t.status.as_str() {
-            "open" => open += 1,
+            "open" => {
+                if t.ready {
+                    ready += 1
+                } else {
+                    blocked += 1
+                }
+            }
             "claimed" | "in_progress" => wip += 1,
             "done" => done += 1,
-            "failed" => fail += 1,
             _ => {}
         }
     }
     let line = Line::from(vec![
-        Span::styled(format!("{} open", open), Style::new().fg(Color::Cyan)),
+        Span::styled(format!("{} ready", ready), Style::new().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::styled(format!("{} blkd", blocked), Style::new().fg(Color::DarkGray)),
         Span::raw(" "),
         Span::styled(format!("{} wip", wip), Style::new().fg(Color::Yellow)),
         Span::raw(" "),
         Span::styled(format!("{} done", done), Style::new().fg(Color::Green)),
-        Span::raw(" "),
-        Span::styled(format!("{} fail", fail), Style::new().fg(Color::Red)),
         Span::styled(format!("  L{} C{}", g.locks.len(), g.notes.len()), Style::new().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -351,6 +362,154 @@ fn draw_feed(f: &mut Frame, area: Rect, g: &Group) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+// --- Focus view (one hive, full detail) ------------------------------------
+
+fn draw_focus(f: &mut Frame, area: Rect, app: &App) {
+    let g = match app.groups.get(app.selected) {
+        Some(g) => g,
+        None => return,
+    };
+    let title = format!(
+        " FOCUS · {} · {} instance(s) · {} task(s) ",
+        trunc(&g.group.label, 30),
+        g.agents.len(),
+        g.tasks.len()
+    );
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .title(Span::styled(title, Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let inst_h = (g.agents.len() as u16 + 2).clamp(3, 9);
+    let parts = Layout::vertical([
+        Constraint::Length(inst_h),
+        Constraint::Min(4),
+        Constraint::Length(9),
+    ])
+    .split(inner);
+
+    draw_focus_instances(f, parts[0], g, app.hub_now);
+    draw_focus_tasks(f, parts[1], g);
+
+    let bottom = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(parts[2]);
+    draw_focus_feed(f, bottom[0], g);
+    draw_focus_changes(f, bottom[1], g, app.hub_now);
+}
+
+fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64) {
+    let block = Block::bordered().border_style(Style::new().fg(Color::DarkGray)).title("instances");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines: Vec<Line> = Vec::new();
+    for a in &g.agents {
+        let age = now - a.last_seen;
+        let dot = if age < 20_000 { Color::Green } else if age < 60_000 { Color::Yellow } else { Color::Red };
+        let caps = if a.capabilities.is_empty() { String::new() } else { format!(" {{{}}}", a.capabilities.join(",")) };
+        let doing = match &a.current_task {
+            Some(t) => format!(" ▶ {}", t),
+            None if a.status.is_empty() || a.status == "idle" => " idle".into(),
+            None => format!(" {}", a.status),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::new().fg(dot)),
+            Span::styled(format!("{:<16}", trunc(&a.name, 16)), Style::new().fg(Color::White)),
+            Span::styled(caps, Style::new().fg(Color::Cyan)),
+            Span::styled(doing, Style::new().fg(Color::Yellow)),
+            Span::styled(format!("   {} ({})", path_tail(&a.cwd, 24), fmt_dur(now - a.last_seen)), Style::new().fg(Color::DarkGray)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(no instances)", Style::new().fg(Color::DarkGray))));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_focus_tasks(f: &mut Frame, area: Rect, g: &Group) {
+    let block = Block::bordered().border_style(Style::new().fg(Color::DarkGray)).title("task board");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let order = |s: &str| match s {
+        "claimed" | "in_progress" => 0,
+        "open" => 1,
+        "done" => 2,
+        _ => 3,
+    };
+    let mut tasks: Vec<&crate::client::Task> = g.tasks.iter().collect();
+    tasks.sort_by(|a, b| order(&a.status).cmp(&order(&b.status)).then(b.priority.cmp(&a.priority)));
+
+    let cap = inner.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for t in tasks.iter().take(cap) {
+        let (label, color) = match t.status.as_str() {
+            "open" if t.ready => ("READY  ".to_string(), Color::Cyan),
+            "open" => (format!("BLK<{}>", t.blocked_by.join(",")), Color::DarkGray),
+            "claimed" | "in_progress" => ("WIP    ".to_string(), Color::Yellow),
+            "done" => ("DONE   ".to_string(), Color::Green),
+            "failed" => ("FAIL   ".to_string(), Color::Red),
+            other => (other.to_string(), Color::Gray),
+        };
+        let owner = t.claimed_by.as_deref().map(|o| format!(" @{}", o)).unwrap_or_default();
+        let prio = if t.priority != 0 { format!(" p{}", t.priority) } else { String::new() };
+        let tags = if t.tags.is_empty() { String::new() } else { format!(" #{}", t.tags.join(" #")) };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<5}", t.id), Style::new().fg(Color::White)),
+            Span::styled(format!("{:<10}", label), Style::new().fg(color)),
+            Span::styled(trunc(&t.title, inner.width.saturating_sub(28) as usize), Style::new().fg(Color::Gray)),
+            Span::styled(format!("{}{}{}", prio, owner, tags), Style::new().fg(Color::DarkGray)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(board empty)", Style::new().fg(Color::DarkGray))));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_focus_feed(f: &mut Frame, area: Rect, g: &Group) {
+    let block = Block::bordered().border_style(Style::new().fg(Color::DarkGray)).title("activity feed");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let take = inner.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for a in g.activity.iter().rev().take(take).rev() {
+        let color = match a.kind.as_str() {
+            "task" => Color::Yellow,
+            "context" => Color::Magenta,
+            "system" => Color::DarkGray,
+            "operator" => Color::Cyan,
+            _ => Color::White,
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", trunc(&a.from_name, 12)), Style::new().fg(color)),
+            Span::styled(trunc(&a.body, inner.width.saturating_sub(14) as usize), Style::new().fg(Color::Gray)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(quiet)", Style::new().fg(Color::DarkGray))));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_focus_changes(f: &mut Frame, area: Rect, g: &Group, now: i64) {
+    let block = Block::bordered().border_style(Style::new().fg(Color::DarkGray)).title("recent file edits");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let take = inner.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for c in g.changes.iter().rev().take(take).rev() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", fmt_dur(now - c.ts)), Style::new().fg(Color::DarkGray)),
+            Span::styled(path_tail(&c.file, inner.width.saturating_sub(10) as usize), Style::new().fg(Color::Gray)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(no edits yet)", Style::new().fg(Color::DarkGray))));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 // --- Footer -----------------------------------------------------------------
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
@@ -367,16 +526,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let paused = if app.paused { "  [PAUSED]" } else { "" };
+    let (enter_key, enter_label) = if app.focused { ("esc", " back  ") } else { ("enter", " focus  ") };
     let line = Line::from(vec![
         Span::styled(" q", Style::new().fg(Color::Yellow)),
         Span::raw(" quit  "),
         Span::styled("↑↓/jk", Style::new().fg(Color::Yellow)),
         Span::raw(" select  "),
+        Span::styled(enter_key, Style::new().fg(Color::Yellow)),
+        Span::raw(enter_label),
         Span::styled("b", Style::new().fg(Color::Yellow)),
         Span::raw(" broadcast  "),
         Span::styled("p", Style::new().fg(Color::Yellow)),
         Span::raw(" pause  "),
-        Span::styled("msgs", Style::new().fg(MSG_COLOR)),
+        Span::styled("actv", Style::new().fg(MSG_COLOR)),
         Span::raw("/"),
         Span::styled("edits", Style::new().fg(EDIT_COLOR)),
         Span::styled(paused.to_string(), Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)),
@@ -439,16 +601,18 @@ mod tests {
         let mut g = Group::default();
         g.group = GroupRef { id: "g1".into(), label: "supercode".into() };
         g.agents = vec![
-            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "active".into(), last_seen: 1_000_000 },
-            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "writing tests".into(), last_seen: 985_000 },
+            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), last_seen: 1_000_000 },
+            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), capabilities: vec!["frontend".into()], current_task: None, last_seen: 985_000 },
         ];
         g.tasks = vec![
-            Task { id: "t1".into(), title: "wire button".into(), status: "done".into(), claimed_by: Some("swift-otter".into()) },
-            Task { id: "t2".into(), title: "add api".into(), status: "open".into(), claimed_by: None },
-            Task { id: "t3".into(), title: "tests".into(), status: "claimed".into(), claimed_by: Some("keen-lynx".into()) },
+            Task { id: "t1".into(), title: "wire button".into(), status: "done".into(), claimed_by: Some("swift-otter".into()), ready: false, ..Default::default() },
+            Task { id: "t2".into(), title: "add api".into(), status: "open".into(), claimed_by: None, ready: false, blocked_by: vec!["t1".into()], priority: 2, ..Default::default() },
+            Task { id: "t3".into(), title: "tests".into(), status: "claimed".into(), claimed_by: Some("keen-lynx".into()), tags: vec!["rust".into()], ..Default::default() },
+            Task { id: "t4".into(), title: "ready work".into(), status: "open".into(), ready: true, ..Default::default() },
         ];
         g.activity = vec![Activity { from_name: "swift-otter".into(), body: "claimed t3".into(), kind: "task".into(), ts: 1_000_000 }];
-        g.stats = Stats { messages: 10, broadcasts: 3, edits: 5, tasks_posted: 3, peak_agents: 2 };
+        g.changes = vec![crate::client::Change { who: "supercode:ab".into(), file: "/tmp/supercode/src/hub.js".into(), tool: "Edit".into(), ts: 999_000 }];
+        g.stats = Stats { messages: 10, broadcasts: 3, edits: 5, turns: 7, tasks_posted: 4, peak_agents: 2 };
 
         // A second hive that is empty, to exercise zero-task / zero-agent paths.
         let empty = Group { group: GroupRef { id: "g2".into(), label: "scratch".into() }, ..Default::default() };
@@ -480,6 +644,29 @@ mod tests {
         assert!(s.contains("HIVEMIND"), "header title present");
         assert!(s.contains("supercode"), "first hive label present");
         assert!(s.contains("scratch"), "second hive label present");
+    }
+
+    #[test]
+    fn focus_view_renders_detail() {
+        let mut app = fake_app();
+        app.focused = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let s: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(s.contains("FOCUS"), "focus header shown");
+        assert!(s.contains("task board"), "task board panel shown");
+        assert!(s.contains("recent file edits"), "changes panel shown");
+        assert!(s.contains("READY"), "ready task state shown");
+    }
+
+    #[test]
+    fn focus_renders_without_panic_across_sizes() {
+        for (w, h) in [(120, 40), (80, 24), (60, 16), (40, 10)] {
+            let mut app = fake_app();
+            app.focused = true;
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+        }
     }
 
     #[test]

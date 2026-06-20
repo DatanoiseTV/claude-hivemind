@@ -85,6 +85,10 @@ pub struct Agent {
     #[serde(default)]
     pub status: String,
     #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub current_task: Option<String>,
+    #[serde(default)]
     pub last_seen: i64,
 }
 
@@ -100,6 +104,16 @@ pub struct Task {
     pub status: String,
     #[serde(default)]
     pub claimed_by: Option<String>,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub deps: Vec<String>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 // The following types mirror the full hub wire format. Some fields are not
@@ -169,6 +183,8 @@ pub struct Stats {
     pub broadcasts: u64,
     #[serde(default)]
     pub edits: u64,
+    #[serde(default)]
+    pub turns: u64,
     #[serde(default)]
     pub tasks_posted: u64,
     #[serde(default)]

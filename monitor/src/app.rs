@@ -52,6 +52,7 @@ pub struct App {
     pub global_msg: VecDeque<u64>,
     pub global_edit: VecDeque<u64>,
     pub selected: usize,
+    pub focused: bool,
     pub paused: bool,
     pub input_mode: bool,
     pub input: String,
@@ -73,6 +74,7 @@ impl App {
             global_msg: VecDeque::new(),
             global_edit: VecDeque::new(),
             selected: 0,
+            focused: false,
             paused: false,
             input_mode: false,
             input: String::new(),
@@ -110,7 +112,10 @@ impl App {
         let mut live_ids = std::collections::HashSet::new();
 
         for g in &reply.groups {
-            let cur_msg = g.stats.messages + g.stats.broadcasts;
+            // "Activity" = anything the instances did: turns (a prompt handled),
+            // messages, and broadcasts. This is what makes a busy-but-quiet hive
+            // visibly active even when nobody is calling messaging tools.
+            let cur_msg = g.stats.messages + g.stats.broadcasts + g.stats.turns;
             let cur_edit = g.stats.edits;
             let h = self.hist.entry(g.group.id.clone()).or_default();
             let prev_seeded = h.seeded;
