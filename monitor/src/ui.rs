@@ -433,6 +433,7 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u
         };
         let env = [a.client.as_str(), a.model.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("/");
         let caps = if a.capabilities.is_empty() { String::new() } else { format!(" {{{}}}", a.capabilities.join(",")) };
+        let disp = if a.dispatchable { " ⌨" } else { "" };
         let doing = match &a.current_task {
             Some(t) => format!(" ▶ {}", t),
             None if a.status.is_empty() || a.status == "idle" => " idle".into(),
@@ -443,6 +444,7 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u
             Span::styled(format!("{:<16}", trunc(&a.name, 16)), Style::new().fg(Color::White)),
             Span::styled(if env.is_empty() { String::new() } else { format!(" {}", trunc(&env, 20)) }, Style::new().fg(Color::Green)),
             Span::styled(caps, Style::new().fg(Color::Cyan)),
+            Span::styled(disp, Style::new().fg(AMBER)),
             Span::styled(doing, Style::new().fg(Color::Yellow)),
             Span::styled(format!("  ({})", fmt_dur(now - a.last_seen)), Style::new().fg(Color::DarkGray)),
         ]));
@@ -660,8 +662,8 @@ mod tests {
         let mut g = Group::default();
         g.group = GroupRef { id: "g1".into(), label: "supercode".into() };
         g.agents = vec![
-            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), client: "claude-code".into(), model: "opus".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), last_seen: 1_000_000 },
-            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), client: "opencode".into(), model: "gpt-5".into(), capabilities: vec!["frontend".into()], current_task: None, last_seen: 985_000 },
+            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), client: "claude-code".into(), model: "opus".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), dispatchable: true, last_seen: 1_000_000 },
+            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), client: "opencode".into(), model: "gpt-5".into(), capabilities: vec!["frontend".into()], current_task: None, dispatchable: false, last_seen: 985_000 },
         ];
         g.tasks = vec![
             Task { id: "t1".into(), title: "wire button".into(), status: "done".into(), claimed_by: Some("swift-otter".into()), ready: false, ..Default::default() },

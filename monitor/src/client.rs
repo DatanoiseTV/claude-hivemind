@@ -96,6 +96,8 @@ pub struct Agent {
     #[serde(default)]
     pub current_task: Option<String>,
     #[serde(default)]
+    pub dispatchable: bool,
+    #[serde(default)]
     pub last_seen: i64,
 }
 
