@@ -1,0 +1,947 @@
+'use strict';
+
+// The hive hub: a single per-user background daemon that every Claude Code
+// instance connects to over a Unix socket. It holds all shared state in memory
+// and routes between instances. State is partitioned by "group" (one project /
+// git work-tree = one group), so instances in different projects never see
+// each other.
+//
+// Responsibilities:
+//   - Presence:   who is online in each group, liveness via socket + heartbeat.
+//   - Messaging:  direct messages and group broadcasts, queued per recipient.
+//   - Task board: a shared work queue with atomic claim (work-stealing).
+//   - Context:    a shared key/value blackboard for findings and decisions.
+//   - Locks:      advisory resource locks to avoid clobbering each other.
+//   - Long-poll:  `wait` parks a request until something relevant happens.
+//
+// The daemon is disposable: it keeps nothing on disk, auto-starts on demand,
+// and auto-exits when idle. Losing it loses only in-flight coordination state,
+// never user work.
+
+const net = require('net');
+const fs = require('fs');
+const C = require('./lib/common');
+
+// Limits are sized for large, long-running projects with many cooperating
+// instances. They stay bounded so a runaway producer can't exhaust memory, but
+// the ceilings are high enough that normal hive traffic never hits them.
+const IDLE_SHUTDOWN_MS = 60 * 60 * 1000; // exit after 60 min with zero agents
+const AGENT_STALE_MS = 120 * 1000; // reap agents silent for 120s (heartbeat is 15s)
+const SWEEP_MS = 5 * 1000;
+const EDIT_INTENT_WINDOW_MS = 180 * 1000; // concurrent-edit conflict window
+const MAX_INBOX = 5000; // cap per-agent message queue
+const MAX_BROADCASTS = 2000; // cap per-group ambient feed
+const MAX_CHANGES = 5000; // cap per-group repo-change feed
+const MAX_TASKS = 5000; // cap per-group task board (oldest done/failed pruned)
+const DEFAULT_LOCK_TTL_MS = 15 * 60 * 1000;
+const MAX_LOCK_TTL_MS = 4 * 60 * 60 * 1000;
+const MAX_WAIT_MS = 5 * 60 * 1000; // longest a single long-poll may block
+const MAX_BARRIER_MS = 60 * 60 * 1000; // longest a barrier may hold
+
+function log(msg) {
+  process.stderr.write(`[hub ${new Date().toISOString()}] ${msg}\n`);
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/** @type {Map<string, Group>} */
+const groups = new Map();
+let lastAgentSeenAt = C.now();
+const HUB_STARTED_AT = C.now();
+
+function getGroup(id, label) {
+  let g = groups.get(id);
+  if (!g) {
+    g = {
+      id,
+      label: label || id,
+      agents: new Map(), // agentId -> agent
+      inboxes: new Map(), // agentId -> message[]
+      tasks: [], // task[]
+      notes: new Map(), // key -> { value, summary, by, byName, ts }
+      locks: new Map(), // resource -> { by, byName, ts, ttlMs }
+      broadcasts: [], // ambient feed for hook digests (capped)
+      editIntents: new Map(), // file -> { sessionKey, who, ts }
+      waiters: new Set(), // outstanding long-poll waiters
+      barriers: new Map(), // name -> { parties, arrived: Map<agentId, waiter> }
+      roles: new Map(), // role -> { by, byName, ts } (leader election)
+      recentChanges: [], // { who, file, tool, ts } ring of repo mutations
+      taskSeq: 0,
+      // Cumulative counters so the dashboard can derive live rates from deltas.
+      stats: { messages: 0, broadcasts: 0, edits: 0, tasksPosted: 0, peakAgents: 0, createdAt: C.now() },
+    };
+    groups.set(id, g);
+  }
+  if (label) g.label = label;
+  return g;
+}
+
+function totalAgents() {
+  let n = 0;
+  for (const g of groups.values()) n += g.agents.size;
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// Serialization helpers (strip internal fields before sending to clients)
+// ---------------------------------------------------------------------------
+
+function publicAgent(a) {
+  return {
+    id: a.id,
+    name: a.name,
+    cwd: a.cwd,
+    pid: a.pid,
+    model: a.model,
+    status: a.status,
+    joinedAt: a.joinedAt,
+    lastSeen: a.lastSeen,
+  };
+}
+
+function peersOf(group, exceptId) {
+  const out = [];
+  for (const a of group.agents.values()) {
+    if (a.id === exceptId) continue;
+    out.push(publicAgent(a));
+  }
+  return out;
+}
+
+function publicNotes(group) {
+  const out = [];
+  for (const [key, n] of group.notes) {
+    out.push({ key, summary: n.summary || '', by: n.byName, ts: n.ts });
+  }
+  return out.sort((x, y) => y.ts - x.ts);
+}
+
+function snapshot(group) {
+  return {
+    group: { id: group.id, label: group.label },
+    agents: [...group.agents.values()].map(publicAgent),
+    tasks: group.tasks,
+    notes: publicNotes(group),
+    locks: [...group.locks.entries()].map(([resource, l]) => ({
+      resource,
+      holder: l.byName,
+      ts: l.ts,
+    })),
+    roles: [...group.roles.entries()].map(([role, r]) => ({ role, holder: r.byName })),
+    activity: group.broadcasts.slice(-20),
+    changes: group.recentChanges.slice(-20),
+    stats: group.stats,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Long-poll waiters
+// ---------------------------------------------------------------------------
+
+// Evaluate whether a parked `wait` can now be satisfied. Returns the payload to
+// send, or null to keep waiting. `want` selects which channels wake the waiter.
+function evalWait(group, w) {
+  const result = {};
+  let hit = false;
+
+  if (w.want.has('message')) {
+    const box = group.inboxes.get(w.agentId);
+    if (box && box.length) {
+      result.messages = box.splice(0, box.length); // drain
+      hit = true;
+    }
+  }
+  if (w.want.has('task')) {
+    const open = group.tasks.filter((t) => t.status === 'open');
+    if (open.length) {
+      result.tasks = open;
+      hit = true;
+    }
+  }
+  if (w.want.has('broadcast')) {
+    const fresh = group.broadcasts.filter((b) => b.ts > w.sinceTs);
+    if (fresh.length) {
+      result.broadcasts = fresh;
+      hit = true;
+    }
+  }
+  return hit ? result : null;
+}
+
+function settleWaiter(w, payload) {
+  if (w.settled) return;
+  w.settled = true;
+  clearTimeout(w.timer);
+  w.group.waiters.delete(w);
+  if (w.connState.waiters) w.connState.waiters.delete(w);
+  reply(w.connState.sock, w.id, { ok: true, ...payload });
+}
+
+// Re-check every waiter in a group after a state change. Anything satisfiable
+// is resolved immediately; the rest keep parking.
+function pumpWaiters(group) {
+  for (const w of [...group.waiters]) {
+    const payload = evalWait(group, w);
+    if (payload) settleWaiter(w, payload);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Messaging
+// ---------------------------------------------------------------------------
+
+function deliver(group, agentId, message) {
+  let box = group.inboxes.get(agentId);
+  if (!box) {
+    box = [];
+    group.inboxes.set(agentId, box);
+  }
+  box.push(message);
+  if (box.length > MAX_INBOX) box.splice(0, box.length - MAX_INBOX);
+}
+
+function findAgent(group, idOrName) {
+  if (group.agents.has(idOrName)) return group.agents.get(idOrName);
+  for (const a of group.agents.values()) {
+    if (a.name === idOrName) return a;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Operation handlers. Each returns a plain object (merged into the ok reply)
+// or throws Error (becomes an error reply). `wait` is handled separately
+// because it may defer its reply.
+// ---------------------------------------------------------------------------
+
+const OPS = {
+  register(msg, cs) {
+    const { agent } = msg;
+    if (!agent || !agent.group) throw new Error('register requires agent.group');
+    const group = getGroup(agent.group, agent.groupLabel);
+
+    // Disambiguate duplicate display names within a group.
+    let name = agent.name || agent.id;
+    const taken = new Set([...group.agents.values()].map((a) => a.name));
+    if (taken.has(name)) {
+      let i = 2;
+      while (taken.has(`${name}#${i}`)) i++;
+      name = `${name}#${i}`;
+    }
+
+    const rec = {
+      id: agent.id,
+      name,
+      cwd: agent.cwd || '',
+      pid: agent.pid || 0,
+      model: agent.model || '',
+      status: 'active',
+      joinedAt: C.now(),
+      lastSeen: C.now(),
+      connId: cs.id,
+    };
+    group.agents.set(agent.id, rec);
+    group.stats.peakAgents = Math.max(group.stats.peakAgents, group.agents.size);
+    group.inboxes.set(agent.id, group.inboxes.get(agent.id) || []);
+    cs.agentId = agent.id;
+    cs.groupId = group.id;
+    lastAgentSeenAt = C.now();
+
+    // Tell the existing members someone joined.
+    broadcastSystem(group, agent.id, `${name} joined the hive`);
+    pumpWaiters(group);
+
+    log(`register ${name} (${agent.id}) in ${group.label} [${group.id}] — ${group.agents.size} online`);
+    return { self: publicAgent(rec), snapshot: snapshot(group) };
+  },
+
+  heartbeat(msg, cs) {
+    const a = currentAgent(cs);
+    if (a) {
+      a.lastSeen = C.now();
+      if (msg.status) a.status = String(msg.status).slice(0, 80);
+    }
+    return {};
+  },
+
+  presence(msg, cs) {
+    const a = currentAgent(cs);
+    if (a) {
+      if (msg.status) a.status = String(msg.status).slice(0, 80);
+      a.lastSeen = C.now();
+      const g = groups.get(cs.groupId);
+      if (g) pumpWaiters(g);
+    }
+    return {};
+  },
+
+  unregister(msg, cs) {
+    cleanup(cs, 'unregister');
+    return {};
+  },
+
+  whoami(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    return {
+      self: a ? publicAgent(a) : null,
+      group: { id: g.id, label: g.label },
+      peers: peersOf(g, cs.agentId),
+    };
+  },
+
+  peers(msg, cs) {
+    const g = requireGroup(msg, cs);
+    return { peers: peersOf(g, cs.agentId) };
+  },
+
+  send(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const from = currentAgent(cs);
+    const target = findAgent(g, msg.to);
+    if (!target) throw new Error(`no peer "${msg.to}" in this hive`);
+    const message = {
+      id: C.genId('m'),
+      from: cs.agentId,
+      fromName: from ? from.name : cs.agentId,
+      to: target.id,
+      kind: msg.kind || 'chat',
+      body: msg.body,
+      ts: C.now(),
+    };
+    deliver(g, target.id, message);
+    g.stats.messages++;
+    pumpWaiters(g);
+    return { delivered: true, to: target.name };
+  },
+
+  broadcast(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const from = currentAgent(cs);
+    const fromName = from ? from.name : cs.agentId;
+    let n = 0;
+    for (const a of g.agents.values()) {
+      if (a.id === cs.agentId) continue;
+      deliver(g, a.id, {
+        id: C.genId('m'),
+        from: cs.agentId,
+        fromName,
+        to: a.id,
+        kind: msg.kind || 'chat',
+        body: msg.body,
+        ts: C.now(),
+      });
+      n++;
+    }
+    pushBroadcastFeed(g, fromName, msg.body);
+    g.stats.broadcasts++;
+    pumpWaiters(g);
+    return { delivered: n };
+  },
+
+  inbox(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const box = g.inboxes.get(cs.agentId) || [];
+    const messages = box.splice(0, box.length);
+    return { messages };
+  },
+
+  // Shared context blackboard ------------------------------------------------
+  share(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    if (!msg.key) throw new Error('share requires key');
+    g.notes.set(msg.key, {
+      value: msg.value,
+      summary: msg.summary || '',
+      by: cs.agentId,
+      byName: a ? a.name : cs.agentId,
+      ts: C.now(),
+    });
+    pushBroadcastFeed(g, a ? a.name : cs.agentId, `shared context "${msg.key}"`, 'context');
+    pumpWaiters(g);
+    return { key: msg.key };
+  },
+
+  recall(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const n = g.notes.get(msg.key);
+    if (!n) return { found: false };
+    return {
+      found: true,
+      key: msg.key,
+      value: n.value,
+      summary: n.summary,
+      by: n.byName,
+      ts: n.ts,
+    };
+  },
+
+  list_notes(msg, cs) {
+    const g = requireGroup(msg, cs);
+    return { notes: publicNotes(g) };
+  },
+
+  // Task board ---------------------------------------------------------------
+  task_post(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    if (!msg.title) throw new Error('task_post requires title');
+    const task = {
+      id: `t${++g.taskSeq}`,
+      title: String(msg.title).slice(0, 1000),
+      detail: msg.detail || '',
+      status: 'open', // open | claimed | in_progress | done | failed
+      by: a ? a.name : cs.agentId,
+      claimedBy: null,
+      createdAt: C.now(),
+      updatedAt: C.now(),
+      log: [],
+    };
+    g.tasks.push(task);
+    g.stats.tasksPosted++;
+    pruneTasks(g);
+    pushBroadcastFeed(g, task.by, `posted task ${task.id}: ${task.title}`, 'task');
+    pumpWaiters(g);
+    return { task };
+  },
+
+  task_list(msg, cs) {
+    const g = requireGroup(msg, cs);
+    return { tasks: g.tasks };
+  },
+
+  task_claim(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    const who = a ? a.name : cs.agentId;
+    const task = g.tasks.find((t) => t.id === msg.task_id);
+    if (!task) throw new Error(`no task ${msg.task_id}`);
+    // Atomic claim: the hub is single-threaded, so this check-and-set cannot
+    // race. Two agents claiming the same open task -> exactly one wins.
+    if (task.status !== 'open') {
+      throw new Error(`task ${task.id} is ${task.status} (claimed by ${task.claimedBy || '-'})`);
+    }
+    task.status = 'claimed';
+    task.claimedBy = who;
+    task.updatedAt = C.now();
+    task.log.push({ ts: C.now(), by: who, note: 'claimed' });
+    pushBroadcastFeed(g, who, `claimed task ${task.id}: ${task.title}`, 'task');
+    pumpWaiters(g);
+    return { task };
+  },
+
+  task_update(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    const who = a ? a.name : cs.agentId;
+    const task = g.tasks.find((t) => t.id === msg.task_id);
+    if (!task) throw new Error(`no task ${msg.task_id}`);
+    const valid = ['open', 'claimed', 'in_progress', 'done', 'failed'];
+    if (msg.status && !valid.includes(msg.status)) {
+      throw new Error(`invalid status "${msg.status}"`);
+    }
+    if (msg.status) {
+      task.status = msg.status;
+      if (msg.status === 'open') task.claimedBy = null;
+    }
+    task.updatedAt = C.now();
+    if (msg.note || msg.status) {
+      task.log.push({ ts: C.now(), by: who, note: msg.note || `-> ${msg.status}` });
+    }
+    pushBroadcastFeed(g, who, `task ${task.id} ${task.status}${msg.note ? `: ${msg.note}` : ''}`, 'task');
+    pumpWaiters(g);
+    return { task };
+  },
+
+  // Advisory locks -----------------------------------------------------------
+  lock(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    const who = a ? a.name : cs.agentId;
+    if (!msg.resource) throw new Error('lock requires resource');
+    expireLocks(g);
+    const existing = g.locks.get(msg.resource);
+    if (existing && existing.by !== cs.agentId) {
+      return { acquired: false, holder: existing.byName, since: existing.ts };
+    }
+    g.locks.set(msg.resource, {
+      by: cs.agentId,
+      byName: who,
+      ts: C.now(),
+      ttlMs: Math.min(Number(msg.ttl_ms) || DEFAULT_LOCK_TTL_MS, MAX_LOCK_TTL_MS),
+    });
+    return { acquired: true, resource: msg.resource };
+  },
+
+  unlock(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const existing = g.locks.get(msg.resource);
+    if (existing && existing.by === cs.agentId) {
+      g.locks.delete(msg.resource);
+      return { released: true };
+    }
+    return { released: false, reason: existing ? 'held by another agent' : 'not locked' };
+  },
+
+  // Cross-hook edit-collision detection (keyed by session, not agent id, so the
+  // PreToolUse hook can use it without knowing the MCP agent id).
+  edit_intent(msg, cs) {
+    const g = getGroup(msg.group, msg.groupLabel);
+    const file = msg.file;
+    if (!file) return { conflict: null };
+    const nowTs = C.now();
+    // Drop stale intents.
+    for (const [f, rec] of g.editIntents) {
+      if (nowTs - rec.ts > EDIT_INTENT_WINDOW_MS) g.editIntents.delete(f);
+    }
+    const prior = g.editIntents.get(file);
+    let conflict = null;
+    if (prior && prior.sessionKey !== msg.sessionKey && nowTs - prior.ts <= EDIT_INTENT_WINDOW_MS) {
+      conflict = { who: prior.who, agoMs: nowTs - prior.ts };
+    }
+    g.editIntents.set(file, { sessionKey: msg.sessionKey, who: msg.who || 'a peer', ts: nowTs });
+    return { conflict };
+  },
+
+  // Leader election ----------------------------------------------------------
+  // First caller to claim a named role wins and holds it until they disconnect
+  // or release it. Lets a fleet pick exactly one instance for setup, schema
+  // migrations, dependency installs — anything that must happen once.
+  elect(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const a = currentAgent(cs);
+    const who = a ? a.name : cs.agentId;
+    const role = msg.role || 'leader';
+    const held = g.roles.get(role);
+    if (held && held.by !== cs.agentId && g.agents.has(held.by)) {
+      return { leader: false, role, holder: held.byName };
+    }
+    g.roles.set(role, { by: cs.agentId, byName: who, ts: C.now() });
+    return { leader: true, role, holder: who };
+  },
+
+  release_role(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const role = msg.role || 'leader';
+    const held = g.roles.get(role);
+    if (held && held.by === cs.agentId) {
+      g.roles.delete(role);
+      return { released: true };
+    }
+    return { released: false };
+  },
+
+  // Shared repo-change feed --------------------------------------------------
+  // Fed by the PostToolUse hook so every instance can see which files its peers
+  // just edited — context sharing and a second line of collision defence.
+  record_change(msg, cs) {
+    const g = getGroup(msg.group, msg.groupLabel);
+    if (!msg.file) return {};
+    g.recentChanges.push({
+      who: msg.who || 'a peer',
+      file: msg.file,
+      tool: msg.tool || 'edit',
+      ts: C.now(),
+    });
+    if (g.recentChanges.length > MAX_CHANGES) {
+      g.recentChanges.splice(0, g.recentChanges.length - MAX_CHANGES);
+    }
+    g.stats.edits++;
+    return {};
+  },
+
+  list_changes(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const since = Number(msg.sinceTs) || 0;
+    return { changes: g.recentChanges.filter((c) => c.ts > since) };
+  },
+
+  // Operator broadcast: lets a human at the monitor speak to a whole hive
+  // without being a registered agent. Reaches every instance's inbox + feed.
+  say(msg, cs) {
+    const g = getGroup(msg.group, msg.groupLabel);
+    const from = msg.from || 'operator';
+    let n = 0;
+    for (const a of g.agents.values()) {
+      deliver(g, a.id, {
+        id: C.genId('m'),
+        from: 'operator',
+        fromName: from,
+        to: a.id,
+        kind: 'operator',
+        body: msg.body,
+        ts: C.now(),
+      });
+      n++;
+    }
+    pushBroadcastFeed(g, from, msg.body, 'operator');
+    g.stats.broadcasts++;
+    pumpWaiters(g);
+    return { delivered: n };
+  },
+
+  // Read-only views ----------------------------------------------------------
+  status(msg, cs) {
+    const hub = {
+      startedAt: HUB_STARTED_AT,
+      pid: process.pid,
+      protocol: C.PROTOCOL_VERSION,
+      now: C.now(),
+    };
+    if (msg.group) {
+      const g = groups.get(msg.group);
+      return { hub, groups: g ? [snapshot(g)] : [] };
+    }
+    return { hub, groups: [...groups.values()].map(snapshot) };
+  },
+
+  // Compact summary for hook context injection.
+  digest(msg, cs) {
+    const g = groups.get(msg.group);
+    const nowTs = C.now();
+    if (!g) return { nowTs, peers: [], openTasks: 0, claimedTasks: 0, recentBroadcasts: [] };
+    const since = Number(msg.sinceTs) || 0;
+    return {
+      nowTs,
+      label: g.label,
+      peers: [...g.agents.values()].map((a) => ({ name: a.name, status: a.status, cwd: a.cwd })),
+      openTasks: g.tasks.filter((t) => t.status === 'open').length,
+      claimedTasks: g.tasks.filter((t) => t.status === 'claimed' || t.status === 'in_progress').length,
+      recentBroadcasts: g.broadcasts
+        .filter((b) => b.ts > since)
+        .slice(-6)
+        .map((b) => ({ fromName: b.fromName, body: b.body, kind: b.kind, ts: b.ts })),
+      notes: publicNotes(g).slice(0, 8),
+    };
+  },
+
+  shutdown() {
+    log('shutdown requested via control op');
+    setTimeout(() => process.exit(0), 50);
+    return { ok: true };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Helpers used by the op handlers
+// ---------------------------------------------------------------------------
+
+function currentAgent(cs) {
+  const g = groups.get(cs.groupId);
+  return g ? g.agents.get(cs.agentId) : null;
+}
+
+// Most ops act on the caller's registered group. Allow an explicit group in the
+// message (used by hook-style one-shot clients that never register).
+function requireGroup(msg, cs) {
+  if (cs.groupId && groups.has(cs.groupId)) return groups.get(cs.groupId);
+  if (msg.group) return getGroup(msg.group, msg.groupLabel);
+  throw new Error('not registered to a group');
+}
+
+function pushBroadcastFeed(group, fromName, body, kind) {
+  group.broadcasts.push({ fromName, body, kind: kind || 'chat', ts: C.now() });
+  if (group.broadcasts.length > MAX_BROADCASTS) {
+    group.broadcasts.splice(0, group.broadcasts.length - MAX_BROADCASTS);
+  }
+}
+
+function broadcastSystem(group, exceptId, body) {
+  for (const a of group.agents.values()) {
+    if (a.id === exceptId) continue;
+    deliver(group, a.id, {
+      id: C.genId('m'),
+      from: 'hub',
+      fromName: 'hive',
+      to: a.id,
+      kind: 'system',
+      body,
+      ts: C.now(),
+    });
+  }
+  pushBroadcastFeed(group, 'hive', body, 'system');
+}
+
+function expireLocks(group) {
+  const nowTs = C.now();
+  for (const [res, l] of group.locks) {
+    if (nowTs - l.ts > l.ttlMs) group.locks.delete(res);
+  }
+}
+
+// Keep the task board bounded by discarding the oldest *completed* work first.
+// Active work (open / claimed / in_progress) is never pruned, so a busy hive
+// can't lose live tasks no matter how much history accumulates.
+function pruneTasks(group) {
+  if (group.tasks.length <= MAX_TASKS) return;
+  const live = group.tasks.filter((t) => t.status !== 'done' && t.status !== 'failed');
+  const finished = group.tasks.filter((t) => t.status === 'done' || t.status === 'failed');
+  const keepFinished = Math.max(0, MAX_TASKS - live.length);
+  const trimmed = finished.slice(Math.max(0, finished.length - keepFinished));
+  // Preserve original ordering by id (creation order).
+  group.tasks = [...live, ...trimmed].sort(
+    (a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1))
+  );
+}
+
+function handleWait(cs, msg) {
+  const g = requireGroup(msg, cs);
+  const want = new Set(
+    Array.isArray(msg.want) && msg.want.length ? msg.want : ['message']
+  );
+  const timeoutMs = Math.min(Math.max(Number(msg.timeout_ms) || 30000, 1000), MAX_WAIT_MS);
+  const w = {
+    id: msg.id,
+    agentId: cs.agentId,
+    group: g,
+    connState: cs,
+    want,
+    sinceTs: Number(msg.sinceTs) || C.now(),
+    settled: false,
+    timer: null,
+  };
+  // Fast path: already satisfiable.
+  const immediate = evalWait(g, w);
+  if (immediate) {
+    reply(cs.sock, msg.id, { ok: true, ...immediate });
+    return;
+  }
+  w.timer = setTimeout(() => settleWaiter(w, { timeout: true }), timeoutMs);
+  g.waiters.add(w);
+  cs.waiters.add(w);
+}
+
+// Synchronization barrier: every participant calls `barrier` with the same
+// name and party count and blocks until all have arrived, then they release
+// together. The backbone for lockstep phases across a fleet ("everyone finish
+// scaffolding before anyone starts wiring").
+function handleBarrier(cs, msg) {
+  const g = requireGroup(msg, cs);
+  const name = msg.name || 'sync';
+  const parties = Math.max(1, Number(msg.parties) || 2);
+  const timeoutMs = Math.min(Math.max(Number(msg.timeout_ms) || 60000, 1000), MAX_BARRIER_MS);
+
+  let b = g.barriers.get(name);
+  if (!b) {
+    b = { name, parties, arrived: new Map() };
+    g.barriers.set(name, b);
+  }
+  b.parties = parties; // last writer wins; participants agree by convention
+
+  const arrival = { id: msg.id, cs, settled: false, timer: null };
+  // Replace any previous arrival from this same agent (e.g. a retry).
+  const prev = b.arrived.get(cs.agentId);
+  if (prev) clearTimeout(prev.timer);
+  b.arrived.set(cs.agentId, arrival);
+
+  const release = (payload) => {
+    for (const [aid, ar] of b.arrived) {
+      if (ar.settled) continue;
+      ar.settled = true;
+      clearTimeout(ar.timer);
+      reply(ar.cs.sock, ar.id, { ok: true, ...payload });
+    }
+    g.barriers.delete(name);
+  };
+
+  if (b.arrived.size >= parties) {
+    release({ released: true, name, parties, arrived: b.arrived.size });
+    return;
+  }
+  arrival.timer = setTimeout(() => {
+    if (arrival.settled) return;
+    arrival.settled = true;
+    b.arrived.delete(cs.agentId);
+    if (b.arrived.size === 0) g.barriers.delete(name);
+    reply(cs.sock, msg.id, { ok: true, released: false, timeout: true, name, arrived: b.arrived.size, parties });
+  }, timeoutMs);
+}
+
+// ---------------------------------------------------------------------------
+// Connection lifecycle
+// ---------------------------------------------------------------------------
+
+function reply(sock, id, payload) {
+  if (id == null) return; // notifications get no reply
+  C.sendLine(sock, { id, ...payload });
+}
+
+function onConnection(sock) {
+  const cs = {
+    id: C.genId('c'),
+    sock,
+    agentId: null,
+    groupId: null,
+    waiters: new Set(),
+  };
+  const decode = C.lineDecoder((msg) => {
+    try {
+      if (msg.op === 'wait') {
+        handleWait(cs, msg);
+        return;
+      }
+      if (msg.op === 'barrier') {
+        handleBarrier(cs, msg);
+        return;
+      }
+      const fn = OPS[msg.op];
+      if (!fn) {
+        reply(sock, msg.id, { ok: false, error: `unknown op: ${msg.op}` });
+        return;
+      }
+      // Touch liveness on any traffic from a registered agent.
+      const a = currentAgent(cs);
+      if (a) a.lastSeen = C.now();
+      const result = fn(msg, cs) || {};
+      reply(sock, msg.id, { ok: true, ...result });
+    } catch (e) {
+      reply(sock, msg.id, { ok: false, error: e.message || String(e) });
+    }
+  });
+
+  sock.on('data', (d) => decode(d.toString('utf8')));
+  sock.on('error', () => cleanup(cs, 'error'));
+  sock.on('close', () => cleanup(cs, 'close'));
+}
+
+// Remove an agent and everything tied to its connection. Driven by socket
+// close, so it covers crashes and kill -9 just as well as clean exits.
+function cleanup(cs, reason) {
+  // Cancel any parked waiters on this connection.
+  for (const w of cs.waiters) {
+    w.settled = true;
+    clearTimeout(w.timer);
+    if (w.group) w.group.waiters.delete(w);
+  }
+  cs.waiters.clear();
+
+  if (!cs.groupId) return;
+  const g = groups.get(cs.groupId);
+  if (!g) return;
+  const a = g.agents.get(cs.agentId);
+  if (!a || a.connId !== cs.id) return; // already replaced by a reconnect
+
+  g.agents.delete(cs.agentId);
+  g.inboxes.delete(cs.agentId);
+
+  // Release the departed agent's locks and elected roles.
+  for (const [res, l] of g.locks) {
+    if (l.by === cs.agentId) g.locks.delete(res);
+  }
+  for (const [role, r] of g.roles) {
+    if (r.by === cs.agentId) g.roles.delete(role);
+  }
+  // Drop it from any barrier it was waiting at, so peers aren't stuck forever.
+  for (const [name, b] of g.barriers) {
+    const ar = b.arrived.get(cs.agentId);
+    if (ar) {
+      clearTimeout(ar.timer);
+      b.arrived.delete(cs.agentId);
+      if (b.arrived.size === 0) g.barriers.delete(name);
+    }
+  }
+  // Reopen any work it had claimed but not finished, so a peer can take over.
+  for (const t of g.tasks) {
+    if (t.claimedBy === a.name && (t.status === 'claimed' || t.status === 'in_progress')) {
+      t.status = 'open';
+      t.claimedBy = null;
+      t.updatedAt = C.now();
+      t.log.push({ ts: C.now(), by: 'hive', note: `reopened (${a.name} left)` });
+    }
+  }
+  broadcastSystem(g, cs.agentId, `${a.name} left the hive`);
+  pumpWaiters(g);
+  log(`cleanup ${a.name} (${reason}) — ${g.agents.size} left in ${g.label}`);
+
+  // Drop empty groups so memory doesn't grow with abandoned projects.
+  if (g.agents.size === 0 && g.tasks.length === 0 && g.notes.size === 0) {
+    groups.delete(g.id);
+  }
+  if (totalAgents() === 0) lastAgentSeenAt = C.now();
+}
+
+// ---------------------------------------------------------------------------
+// Periodic maintenance: reap silent agents, expire locks, idle shutdown.
+// ---------------------------------------------------------------------------
+
+function sweep() {
+  const nowTs = C.now();
+  for (const g of groups.values()) {
+    expireLocks(g);
+    for (const a of [...g.agents.values()]) {
+      if (nowTs - a.lastSeen > AGENT_STALE_MS) {
+        log(`reaping stale agent ${a.name} (silent ${Math.round((nowTs - a.lastSeen) / 1000)}s)`);
+        // Synthesize a connection-state to reuse cleanup().
+        cleanup({ id: a.connId, agentId: a.id, groupId: g.id, waiters: new Set() }, 'stale');
+      }
+    }
+  }
+  if (totalAgents() === 0 && nowTs - lastAgentSeenAt > IDLE_SHUTDOWN_MS) {
+    log('idle with no agents — shutting down');
+    gracefulExit();
+  }
+}
+
+function gracefulExit() {
+  try {
+    if (process.platform !== 'win32') fs.unlinkSync(C.socketPath());
+  } catch (_) {
+    /* ignore */
+  }
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap: bind the socket, handling a stale file or a live rival hub.
+// ---------------------------------------------------------------------------
+
+function start() {
+  const sockPath = C.socketPath();
+  const server = net.createServer(onConnection);
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      // Either a live hub already owns the socket, or it's a stale file from a
+      // crashed hub. Probe by connecting: success -> defer to the live one;
+      // failure -> remove the stale file and retry.
+      const probe = net.connect(sockPath);
+      probe.on('connect', () => {
+        probe.destroy();
+        log('another hub is already running — exiting');
+        process.exit(0);
+      });
+      probe.on('error', () => {
+        if (process.platform !== 'win32') {
+          try {
+            fs.unlinkSync(sockPath);
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        setTimeout(() => server.listen(sockPath), 50);
+      });
+    } else {
+      log(`fatal server error: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+  server.listen(sockPath, () => {
+    try {
+      if (process.platform !== 'win32') fs.chmodSync(sockPath, 0o600);
+    } catch (_) {
+      /* ignore */
+    }
+    log(`listening on ${sockPath} (pid ${process.pid}, protocol v${C.PROTOCOL_VERSION})`);
+  });
+
+  setInterval(sweep, SWEEP_MS).unref();
+
+  process.on('SIGTERM', gracefulExit);
+  process.on('SIGINT', gracefulExit);
+}
+
+start();
