@@ -3,7 +3,8 @@ name = "hivemind-monitor"
 version = "0.2.0"
 edition = "2021"
 description = "Terminal dashboard (ratatui) for the Claude Code Hivemind hub — shows every project hive at once with live graphs."
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/DatanoiseTV/claude-hivemind"
 
 [[bin]]
 name = "hivemind-monitor"

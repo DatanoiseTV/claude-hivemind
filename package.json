@@ -20,5 +20,11 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "DatanoiseTV (https://github.com/DatanoiseTV)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DatanoiseTV/claude-hivemind.git"
+  },
+  "homepage": "https://github.com/DatanoiseTV/claude-hivemind#readme"
 }

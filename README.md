@@ -1,5 +1,8 @@
 # Hivemind
 
+[![CI](https://github.com/DatanoiseTV/claude-hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/DatanoiseTV/claude-hivemind/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
+
 A Claude Code plugin that lets **multiple Claude Code instances working in the
 same project talk to each other in real time** and collaborate as one hive:
 shared presence, messaging, a shared-context blackboard, a work-stealing task
@@ -215,4 +218,6 @@ state: `~/.claude/hivemind/group-*.json`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[PolyForm Noncommercial 1.0.0](LICENSE). Free to use, modify, and share for any
+**noncommercial** purpose, with attribution (`Required Notice: Copyright (c) 2026
+DatanoiseTV`). Commercial use requires a separate license — open an issue to ask.
