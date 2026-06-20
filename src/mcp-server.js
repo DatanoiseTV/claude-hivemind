@@ -17,7 +17,7 @@ const C = require('./lib/common');
 const { PersistentClient } = require('./lib/hub-client');
 
 const SERVER_NAME = 'hivemind';
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.2.0';
 const DEFAULT_PROTOCOL = '2025-06-18';
 
 function logErr(msg) {
@@ -36,6 +36,12 @@ const agent = {
   cwd: group.dir,
   pid: process.pid,
   model: process.env.HIVEMIND_MODEL || '',
+  // Optional capability tags (e.g. "rust,frontend,tests") so the task board can
+  // route work to the instance best suited for it.
+  capabilities: (process.env.HIVEMIND_CAPS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
 };
 
 const client = new PersistentClient({ agent, log: logErr });
@@ -55,7 +61,11 @@ function ageStr(ts) {
 function fmtPeers(peers) {
   if (!peers || !peers.length) return 'No other instances are in this hive right now.';
   return peers
-    .map((p) => `- ${p.name}${p.status && p.status !== 'active' ? ` [${p.status}]` : ''} — ${p.cwd || '?'} (seen ${ageStr(p.lastSeen)})`)
+    .map((p) => {
+      const caps = p.capabilities && p.capabilities.length ? ` {${p.capabilities.join(',')}}` : '';
+      const doing = p.currentTask ? ` — working on ${p.currentTask}` : p.status && p.status !== 'idle' ? ` [${p.status}]` : '';
+      return `- ${p.name}${caps}${doing} — ${p.cwd || '?'} (seen ${ageStr(p.lastSeen)})`;
+    })
     .join('\n');
 }
 
@@ -63,10 +73,14 @@ function fmtTasks(tasks) {
   if (!tasks || !tasks.length) return 'Task board is empty.';
   const order = { open: 0, claimed: 1, in_progress: 1, done: 2, failed: 3 };
   return [...tasks]
-    .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9))
+    .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.priority || 0) - (a.priority || 0))
     .map((t) => {
       const who = t.claimedBy ? ` @${t.claimedBy}` : '';
-      return `- [${t.id}] ${t.status.toUpperCase()}${who}: ${t.title}${t.detail ? `\n    ${t.detail}` : ''}`;
+      const tags = t.tags && t.tags.length ? ` #${t.tags.join(' #')}` : '';
+      const prio = t.priority ? ` p${t.priority}` : '';
+      let state = t.status.toUpperCase();
+      if (t.status === 'open') state = t.ready ? 'READY' : `BLOCKED(${(t.blockedBy || []).join(',')})`;
+      return `- [${t.id}] ${state}${prio}${who}${tags}: ${t.title}${t.detail ? `\n    ${t.detail}` : ''}`;
     })
     .join('\n');
 }
@@ -230,24 +244,42 @@ const TOOLS = [
   {
     name: 'task_post',
     description:
-      'Post a unit of work to the shared task board for any instance (including you) to claim and execute. Use to split a large goal into parallelizable pieces that the hive can work through concurrently.',
+      'Post a unit of work to the shared task board for any instance (including you) to claim and execute. Supports dependencies (deps), so you can post a whole plan at once and the board will only let workers claim a task once its prerequisites are done. Use priority and tags to steer which instance picks it up first.',
     inputSchema: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'Short task title.' },
         detail: { type: 'string', description: 'Optional fuller description / acceptance criteria.' },
+        deps: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Task ids that must be "done" before this task becomes claimable (e.g. ["t1","t2"]).',
+        },
+        priority: { type: 'number', description: 'Higher = claimed first among ready tasks (default 0).' },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Capability tags (e.g. ["frontend"]); instances with matching capabilities are routed these first.',
+        },
       },
       required: ['title'],
       additionalProperties: false,
     },
     async handler(args) {
-      const r = await client.request('task_post', { title: args.title, detail: args.detail || '' });
-      return text(`Posted task ${r.task.id}: ${r.task.title}`);
+      const r = await client.request('task_post', {
+        title: args.title,
+        detail: args.detail || '',
+        deps: args.deps || [],
+        priority: args.priority || 0,
+        tags: args.tags || [],
+      });
+      const dep = r.task.blockedBy && r.task.blockedBy.length ? ` (waiting on ${r.task.blockedBy.join(', ')})` : '';
+      return text(`Posted task ${r.task.id}: ${r.task.title}${dep}`);
     },
   },
   {
     name: 'task_list',
-    description: 'Show the shared task board: every task with its status (open/claimed/in_progress/done/failed) and who owns it.',
+    description: 'Show the shared task board: every task with its status (open/claimed/in_progress/done/failed), whether it is ready to claim (deps satisfied), what it is blocked by, priority, tags, and who owns it.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
       const r = await client.request('task_list');
@@ -255,17 +287,28 @@ const TOOLS = [
     },
   },
   {
+    name: 'task_next',
+    description:
+      'The smart way to grab work: atomically claim the single best ready task for you — highest priority, matching your capabilities, oldest first — skipping anything blocked by unfinished dependencies. This is the one call a worker loop needs; it replaces list-then-pick-then-claim.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const r = await client.request('task_next');
+      if (!r.task) return text('No ready task available right now. Use the wait tool with want ["task"] to block until one appears.');
+      return text(`Claimed ${r.task.id}: ${r.task.title}. Work it, then mark done with task_update. Call task_next again for more.`);
+    },
+  },
+  {
     name: 'task_claim',
     description:
-      'Atomically claim an open task so no other instance picks it up. Exactly one instance can win a given task. Claim before you start working so the hive divides labour without collisions.',
+      'Atomically claim a specific open task by id so no other instance picks it up (exactly one instance wins). Fails if the task is blocked by unfinished dependencies. Omit task_id to claim the best ready task instead (same as task_next).',
     inputSchema: {
       type: 'object',
-      properties: { task_id: { type: 'string', description: 'Task id (e.g. "t3").' } },
-      required: ['task_id'],
+      properties: { task_id: { type: 'string', description: 'Task id (e.g. "t3"). Omit to auto-pick the best ready task.' } },
       additionalProperties: false,
     },
     async handler(args) {
-      const r = await client.request('task_claim', { task_id: args.task_id });
+      const r = await client.request('task_claim', args.task_id ? { task_id: args.task_id } : {});
+      if (!r.task) return text('No ready task available to claim.');
       return text(`Claimed ${r.task.id}: ${r.task.title}. Mark it in_progress/done with task_update.`);
     },
   },

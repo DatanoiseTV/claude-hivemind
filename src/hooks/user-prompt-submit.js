@@ -53,7 +53,16 @@ function pruneOldCursors() {
   const cursorFile = C.cursorPath(evt.session_id);
   const sinceTs = readCursor(cursorFile);
 
-  const r = await quickRequest('digest', { group: group.id, sinceTs }, { timeoutMs: 1000 });
+  // Pulse a "turn" so the hive reflects that this instance is actively working,
+  // and pull the digest — in parallel so neither adds latency to the other.
+  const [, r] = await Promise.all([
+    quickRequest(
+      'note_activity',
+      { group: group.id, groupLabel: group.label, kind: 'turn', sessionKey: evt.session_id, label: (evt.prompt || '').slice(0, 60) },
+      { timeoutMs: 700 }
+    ),
+    quickRequest('digest', { group: group.id, sinceTs }, { timeoutMs: 1000 }),
+  ]);
   if (!r || !r.ok) process.exit(0);
 
   writeCursor(cursorFile, r.nowTs || C.now());
