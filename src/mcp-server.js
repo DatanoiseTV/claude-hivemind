@@ -17,7 +17,7 @@ const C = require('./lib/common');
 const { PersistentClient } = require('./lib/hub-client');
 
 const SERVER_NAME = 'hivemind';
-const SERVER_VERSION = '0.4.0';
+const SERVER_VERSION = '0.5.0';
 const DEFAULT_PROTOCOL = '2025-06-18';
 
 function logErr(msg) {
@@ -81,6 +81,14 @@ function fmtPeers(peers) {
     .join('\n');
 }
 
+function fmtParticipants(participants) {
+  if (!participants || !participants.length) return '';
+  return (
+    `\n\n${participants.length} named participant(s) / subagent(s):\n` +
+    participants.map((p) => `- ${p.name} (sub${p.pending ? `, ${p.pending} pending` : ''})`).join('\n')
+  );
+}
+
 function fmtTasks(tasks) {
   if (!tasks || !tasks.length) return 'Task board is empty.';
   const order = { open: 0, claimed: 1, in_progress: 1, done: 2, failed: 3 };
@@ -123,7 +131,8 @@ const TOOLS = [
       return text(
         `You are "${agent.name}" in hive "${r.group.label}" (group ${r.group.id}).\n` +
           `Project: ${agent.cwd}\n\n` +
-          `${peers.length} peer instance(s) connected:\n${fmtPeers(peers)}`
+          `${peers.length} peer instance(s) connected:\n${fmtPeers(peers)}` +
+          fmtParticipants(r.participants)
       );
     },
   },
@@ -133,57 +142,67 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async handler() {
       const r = await client.request('peers');
-      return text(fmtPeers(r.peers));
+      return text(fmtPeers(r.peers) + fmtParticipants(r.participants));
     },
   },
   {
     name: 'send',
     description:
-      'Send a direct message to one specific peer instance (by its name, e.g. "swift-otter"). Use for handing off a subtask, asking a targeted question, or sharing a result with one collaborator. The peer receives it via its inbox / wait.',
+      'Send a direct message to one peer by name (e.g. "swift-otter"). The recipient can be another connected instance OR a named participant such as a subagent (a name with no live connection gets a mailbox it can drain). Use `as` to send under a sub-identity so multiple agents/subagents in one session can address each other distinctly.',
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: 'Target peer name (or id) as shown by whoami/peers.' },
+        to: { type: 'string', description: 'Recipient name (a peer instance, or any named participant / subagent).' },
         text: { type: 'string', description: 'Message body.' },
+        as: { type: 'string', description: 'Optional: send under this sub-identity (e.g. a subagent name) instead of this instance.' },
       },
       required: ['to', 'text'],
       additionalProperties: false,
     },
     async handler(args) {
-      const r = await client.request('send', { to: args.to, body: args.text });
+      const r = await client.request('send', { to: args.to, body: args.text, as: args.as });
       return text(`Delivered to ${r.to}.`);
     },
   },
   {
     name: 'broadcast',
     description:
-      'Send a message to every other instance in this project hive at once. Use to announce what you are working on, share a decision, or coordinate division of labour.',
+      'Send a message to every other instance and active named participant (subagent) in this project hive at once. Use `as` to broadcast under a sub-identity.',
     inputSchema: {
       type: 'object',
-      properties: { text: { type: 'string', description: 'Message body.' } },
+      properties: {
+        text: { type: 'string', description: 'Message body.' },
+        as: { type: 'string', description: 'Optional sub-identity to broadcast as.' },
+      },
       required: ['text'],
       additionalProperties: false,
     },
     async handler(args) {
-      const r = await client.request('broadcast', { body: args.text });
-      return text(`Broadcast to ${r.delivered} peer(s).`);
+      const r = await client.request('broadcast', { body: args.text, as: args.as });
+      return text(`Broadcast to ${r.delivered} recipient(s).`);
     },
   },
   {
     name: 'inbox',
     description:
-      'Retrieve and clear all messages other instances have sent you since you last checked (direct messages, broadcasts, and system notices like peers joining/leaving). Non-blocking.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    async handler() {
-      const r = await client.request('inbox');
+      'Retrieve and clear your pending messages (direct messages and broadcasts). Pass `as` to drain a named participant\'s mailbox instead — this is how a subagent checks messages sent to its own name. Non-blocking.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        as: { type: 'string', description: 'Optional: drain this named participant\'s (subagent\'s) mailbox instead of your own inbox.' },
+      },
+      additionalProperties: false,
+    },
+    async handler(args) {
+      const r = await client.request('inbox', { as: args.as });
       const m = fmtMessages(r.messages);
-      return text(m ? `You have ${r.messages.length} new message(s):\n${m}` : 'Inbox is empty.');
+      return text(m ? `${r.messages.length} new message(s):\n${m}` : 'Inbox is empty.');
     },
   },
   {
     name: 'wait',
     description:
-      'Block until something happens in the hive, then return immediately. Use to synchronize with peers in real time — e.g. wait for a teammate to reply, or (as a worker) wait for a task to appear. Returns as soon as a matching event arrives, or after the timeout. Default waits for incoming messages.',
+      'Block until something happens in the hive, then return immediately. Use to synchronize with peers in real time — wait for a teammate to reply, or (as a worker) wait for a task to become ready. Pass `as` to wait on a named participant\'s (subagent\'s) mailbox. Returns as soon as a matching event arrives, or after the timeout.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -191,15 +210,16 @@ const TOOLS = [
         want: {
           type: 'array',
           items: { type: 'string', enum: ['message', 'task', 'broadcast'] },
-          description: 'Which events wake you. "message" = a peer messaged you; "task" = an open task is available to claim; "broadcast" = any new group broadcast. Default ["message"].',
+          description: 'Which events wake you. "message" = someone messaged you; "task" = a ready task is available to claim; "broadcast" = any new group broadcast. Default ["message"].',
         },
+        as: { type: 'string', description: 'Optional: wait on this named participant\'s (subagent\'s) mailbox.' },
       },
       additionalProperties: false,
     },
     async handler(args) {
       const secs = Math.min(Math.max(Number(args.timeout_seconds) || 30, 1), 300);
       const want = Array.isArray(args.want) && args.want.length ? args.want : ['message'];
-      const r = await client.request('wait', { timeout_ms: secs * 1000, want }, secs * 1000 + 5000);
+      const r = await client.request('wait', { timeout_ms: secs * 1000, want, as: args.as }, secs * 1000 + 5000);
       if (r.timeout) return text(`No matching activity within ${secs}s. (You can wait again.)`);
       const parts = [];
       const m = fmtMessages(r.messages);

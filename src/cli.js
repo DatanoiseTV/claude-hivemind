@@ -167,6 +167,14 @@ async function cmdTaskDone() {
   console.log(`Task ${id} -> done.`);
 }
 
+async function cmdInbox() {
+  const c = ctx();
+  const r = await quickRequest('inbox', { group: c.group, groupLabel: c.groupLabel, as: c.as }, { timeoutMs: 1500 });
+  if (!r || !r.ok) return offline();
+  if (!r.messages.length) return console.log(`No messages for "${c.as}".`);
+  for (const m of r.messages) console.log(`${m.fromName}: ${m.body}`);
+}
+
 async function cmdSend() {
   const to = process.argv[3];
   const body = rest(4);
@@ -230,6 +238,7 @@ const table = {
   'task-next': cmdTaskNext,
   'task-post': cmdTaskPost,
   'task-done': cmdTaskDone,
+  inbox: cmdInbox,
   send: cmdSend,
   broadcast: cmdBroadcast,
   share: cmdShare,
@@ -246,7 +255,8 @@ const usage =
   '  task-next               claim the best ready task (for scripts)\n' +
   '  task-post <title>       add a task\n' +
   '  task-done <id> [note]   mark a task done\n' +
-  '  send <peer> <msg>       direct message a peer\n' +
+  '  send <peer> <msg>       direct message a peer or named participant\n' +
+  '  inbox                   read messages for HIVEMIND_NAME (a subagent mailbox)\n' +
   '  broadcast <msg>         message the whole hive\n' +
   '  share <key> <value>     publish shared context\n' +
   '  recall [key]            read shared context\n' +

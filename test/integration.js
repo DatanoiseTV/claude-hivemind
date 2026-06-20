@@ -152,6 +152,21 @@ async function main() {
   assert(wr.timeout === true, 'a peer joining does not wake a waiting instance (no auto-dispatch)');
   await tmp.unregister();
 
+  // Named participants (subagents): distinct identities with their own mailboxes,
+  // so agents launched inside one session can message each other by name.
+  await quickRequest('send', { group: group.id, as: 'sub-A', to: 'sub-B', body: 'ping from A' }, { timeoutMs: 1000 });
+  const inbB = await quickRequest('inbox', { group: group.id, as: 'sub-B' }, { timeoutMs: 1000 });
+  assert(inbB.messages.some((m) => m.body === 'ping from A' && m.fromName === 'sub-A'), 'subagents can message each other by name (mailboxes)');
+
+  // A named participant can long-poll its mailbox in real time over any connection.
+  const waitSub = a.request('wait', { as: 'sub-C', want: ['message'], timeout_ms: 2000 }, 5000);
+  setTimeout(() => quickRequest('send', { group: group.id, as: 'sub-D', to: 'sub-C', body: 'hi C' }, { timeoutMs: 1000 }), 200);
+  const wsub = await waitSub;
+  assert(wsub.messages && wsub.messages.some((m) => m.body === 'hi C'), 'a subagent can wait on its mailbox in real time');
+
+  const pr = await a.request('peers');
+  assert((pr.participants || []).some((p) => p.name === 'sub-C'), 'active subagents appear as participants');
+
   // Turn-activity pulse increments the dashboard turns counter.
   const beforeTurns = (await a.request('status', { group: group.id })).groups[0].stats.turns;
   await quickRequest('note_activity', { group: group.id, kind: 'turn', sessionKey: 'sx', label: 'doing things' }, { timeoutMs: 1000 });

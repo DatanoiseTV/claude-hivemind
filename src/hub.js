@@ -48,6 +48,8 @@ const MAX_LOCK_TTL_MS = 4 * 60 * 60 * 1000;
 const MAX_WAIT_MS = 5 * 60 * 1000; // longest a single long-poll may block
 const MAX_BARRIER_MS = 60 * 60 * 1000; // longest a barrier may hold
 const PERSIST_DEBOUNCE_MS = 1500; // coalesce durable-state writes
+const ACTIVE_MAILBOX_MS = 5 * 60 * 1000; // a named participant counts as "present" if used within this
+const MAILBOX_TTL_MS = 30 * 60 * 1000; // reap idle, empty named mailboxes
 
 function log(msg) {
   process.stderr.write(`[hub ${new Date().toISOString()}] ${msg}\n`);
@@ -70,6 +72,7 @@ function getGroup(id, label) {
       label: label || id,
       agents: new Map(), // agentId -> agent
       inboxes: new Map(), // agentId -> message[]
+      mailboxes: new Map(), // name -> { messages: [], lastSeen } — named, socket-less participants (e.g. subagents)
       tasks: [], // task[]
       notes: new Map(), // key -> { value, summary, by, byName, ts }
       locks: new Map(), // resource -> { by, byName, ts, ttlMs }
@@ -185,13 +188,13 @@ function publicAgent(a) {
   };
 }
 
-// The acting party's display name for an op: a registered agent's name, else an
-// explicit `as` label (used by one-shot CLI participants from other IDEs/scripts
-// that aren't full hive members), else the bare connection id.
+// The acting party's display name for an op. An explicit `as` always wins (a
+// subagent or script acting under its own sub-identity, even over the shared
+// session connection); then a registered agent's name; else the connection id.
 function actorName(msg, cs) {
+  if (msg && msg.as) return String(msg.as).slice(0, 60);
   const a = currentAgent(cs);
   if (a) return a.name;
-  if (msg && msg.as) return String(msg.as).slice(0, 60);
   return cs.agentId || 'anon';
 }
 
@@ -301,6 +304,7 @@ function snapshot(group) {
       ts: l.ts,
     })),
     roles: [...group.roles.entries()].map(([role, r]) => ({ role, holder: r.byName })),
+    participants: activeMailboxes(group, null),
     activity: group.broadcasts.slice(-20),
     changes: group.recentChanges.slice(-20),
     stats: group.stats,
@@ -318,7 +322,10 @@ function evalWait(group, w) {
   let hit = false;
 
   if (w.want.has('message')) {
-    const box = group.inboxes.get(w.agentId);
+    // A mailbox waiter (named participant) drains its mailbox; otherwise the
+    // connected instance drains its own socket inbox.
+    const mb = w.mailbox ? group.mailboxes.get(w.mailbox) : null;
+    const box = w.mailbox ? mb && mb.messages : group.inboxes.get(w.agentId);
     if (box && box.length) {
       result.messages = box.splice(0, box.length); // drain
       hit = true;
@@ -381,6 +388,40 @@ function findAgent(group, idOrName) {
     if (a.name === idOrName) return a;
   }
   return null;
+}
+
+// Named, socket-less participants: a way for actors that don't hold their own
+// connection (subagents spawned inside one session, scripts, other tools) to
+// have a distinct identity with its own inbox. Keyed by name, kept alive by use,
+// reaped when idle.
+function getMailbox(group, name) {
+  let m = group.mailboxes.get(name);
+  if (!m) {
+    m = { messages: [], lastSeen: C.now() };
+    group.mailboxes.set(name, m);
+  }
+  return m;
+}
+
+function deliverMailbox(group, name, message) {
+  const m = getMailbox(group, name);
+  m.messages.push(message);
+  if (m.messages.length > MAX_INBOX) m.messages.splice(0, m.messages.length - MAX_INBOX);
+}
+
+function touchMailbox(group, name) {
+  if (name) getMailbox(group, name).lastSeen = C.now();
+}
+
+function activeMailboxes(group, exceptName) {
+  const nowTs = C.now();
+  const out = [];
+  for (const [name, m] of group.mailboxes) {
+    if (name === exceptName) continue;
+    if (nowTs - m.lastSeen > ACTIVE_MAILBOX_MS) continue;
+    out.push({ name, kind: 'sub', lastSeen: m.lastSeen, pending: m.messages.length });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -466,58 +507,79 @@ const OPS = {
       self: a ? publicAgent(a) : null,
       group: { id: g.id, label: g.label },
       peers: peersOf(g, cs.agentId),
+      participants: activeMailboxes(g, msg.as),
     };
   },
 
   peers(msg, cs) {
     const g = requireGroup(msg, cs);
-    return { peers: peersOf(g, cs.agentId) };
+    return { peers: peersOf(g, cs.agentId), participants: activeMailboxes(g, msg.as) };
   },
 
   send(msg, cs) {
     const g = requireGroup(msg, cs);
+    if (!msg.to) throw new Error('send requires a recipient (to)');
     const target = findAgent(g, msg.to);
-    if (!target) throw new Error(`no peer "${msg.to}" in this hive`);
     const message = {
       id: C.genId('m'),
       from: cs.agentId,
       fromName: actorName(msg, cs),
-      to: target.id,
+      to: target ? target.id : msg.to,
       kind: msg.kind || 'chat',
       body: msg.body,
       ts: C.now(),
     };
-    deliver(g, target.id, message);
+    // A connected instance -> its socket inbox; otherwise a named mailbox (a
+    // subagent / script / any named participant).
+    if (target) {
+      deliver(g, target.id, message);
+    } else {
+      deliverMailbox(g, msg.to, message);
+    }
     g.stats.messages++;
+    touchMailbox(g, msg.as); // keep the sender's named identity alive
     pumpWaiters(g);
-    return { delivered: true, to: target.name };
+    return { delivered: true, to: target ? target.name : msg.to };
   },
 
   broadcast(msg, cs) {
     const g = requireGroup(msg, cs);
     const fromName = actorName(msg, cs);
+    const mk = (to) => ({
+      id: C.genId('m'),
+      from: cs.agentId,
+      fromName,
+      to,
+      kind: msg.kind || 'chat',
+      body: msg.body,
+      ts: C.now(),
+    });
     let n = 0;
     for (const a of g.agents.values()) {
       if (a.id === cs.agentId) continue;
-      deliver(g, a.id, {
-        id: C.genId('m'),
-        from: cs.agentId,
-        fromName,
-        to: a.id,
-        kind: msg.kind || 'chat',
-        body: msg.body,
-        ts: C.now(),
-      });
+      deliver(g, a.id, mk(a.id));
+      n++;
+    }
+    // Also reach active named participants (e.g. sibling subagents), minus self.
+    for (const p of activeMailboxes(g, msg.as)) {
+      deliverMailbox(g, p.name, mk(p.name));
       n++;
     }
     pushBroadcastFeed(g, fromName, msg.body);
     g.stats.broadcasts++;
+    touchMailbox(g, msg.as);
     pumpWaiters(g);
     return { delivered: n };
   },
 
   inbox(msg, cs) {
     const g = requireGroup(msg, cs);
+    if (msg.as) {
+      // Drain a named participant's mailbox (a subagent checking its messages).
+      const m = getMailbox(g, msg.as);
+      m.lastSeen = C.now();
+      return { messages: m.messages.splice(0, m.messages.length) };
+    }
     const box = g.inboxes.get(cs.agentId) || [];
     const messages = box.splice(0, box.length);
     return { messages };
@@ -971,10 +1033,12 @@ function handleWait(cs, msg) {
     group: g,
     connState: cs,
     want,
+    mailbox: msg.as || null, // wait on a named participant's mailbox instead of the socket inbox
     sinceTs: Number(msg.sinceTs) || C.now(),
     settled: false,
     timer: null,
   };
+  if (w.mailbox) touchMailbox(g, w.mailbox); // a waiting subagent counts as present
   // Fast path: already satisfiable.
   const immediate = evalWait(g, w);
   if (immediate) {
@@ -1162,6 +1226,10 @@ function sweep() {
         // Synthesize a connection-state to reuse cleanup().
         cleanup({ id: a.connId, agentId: a.id, groupId: g.id, waiters: new Set() }, 'stale');
       }
+    }
+    // Reap idle, empty named mailboxes (a subagent that finished and went away).
+    for (const [name, m] of g.mailboxes) {
+      if (!m.messages.length && nowTs - m.lastSeen > MAILBOX_TTL_MS) g.mailboxes.delete(name);
     }
   }
   if (totalAgents() === 0 && nowTs - lastAgentSeenAt > IDLE_SHUTDOWN_MS) {
