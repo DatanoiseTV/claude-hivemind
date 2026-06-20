@@ -31,11 +31,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()>
             app.tick();
         }
 
+        app.animate();
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Poll briefly so the UI stays responsive to keys while still ticking
-        // the data refresh roughly once a second.
-        if event::poll(Duration::from_millis(200))? {
+        // ~10 fps: smooth enough for spinners/pulses, cheap on CPU. Keys are
+        // handled the instant they arrive; data still refreshes once a second.
+        if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;

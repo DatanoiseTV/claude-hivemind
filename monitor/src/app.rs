@@ -58,7 +58,16 @@ pub struct App {
     pub input: String,
     pub status_line: String,
     pub last_fetch: Instant,
+    /// Monotonic render-frame counter that drives all animation (spinners,
+    /// pulses, shimmer). Advances every rendered frame (~10/s), independent of
+    /// the once-a-second data refresh.
+    pub frame: u64,
+    /// Per-hive "just had activity" flash countdown, in frames. Set when a hive's
+    /// activity/edit counters tick up; decays to zero so cards light up live.
+    pub flash: HashMap<String, u32>,
 }
+
+pub const FLASH_FRAMES: u32 = 9;
 
 impl App {
     pub fn new() -> Self {
@@ -82,7 +91,18 @@ impl App {
             last_fetch: Instant::now()
                 .checked_sub(std::time::Duration::from_secs(5))
                 .unwrap_or_else(Instant::now),
+            frame: 0,
+            flash: HashMap::new(),
         }
+    }
+
+    /// Advance animation one frame: bump the frame counter and decay flashes.
+    pub fn animate(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        self.flash.retain(|_, v| {
+            *v = v.saturating_sub(1);
+            *v > 0
+        });
     }
 
     /// Poll the hub and fold the result into history. Called ~1/s.
@@ -122,8 +142,13 @@ impl App {
             let (pm, pe) = (h.prev_msg(), h.prev_edit());
             h.push(cur_msg, cur_edit);
             if prev_seeded {
-                total_msg += cur_msg.saturating_sub(pm);
-                total_edit += cur_edit.saturating_sub(pe);
+                let dm = cur_msg.saturating_sub(pm);
+                let de = cur_edit.saturating_sub(pe);
+                total_msg += dm;
+                total_edit += de;
+                if dm > 0 || de > 0 {
+                    self.flash.insert(g.group.id.clone(), FLASH_FRAMES);
+                }
             }
             live_ids.insert(g.group.id.clone());
         }

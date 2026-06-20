@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use crate::app::{App, FLASH_FRAMES};
 use crate::client::Group;
 
 const MSG_COLOR: Color = Color::Cyan;
@@ -38,10 +38,16 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "—".into()
     };
-    let title = format!(" HIVEMIND  ·  hub up {}  ·  pid {}  ·  proto v{} ", up, app.hub_pid, app.hub_protocol);
-    let border_color = if app.connected { Color::Green } else { Color::Red };
+    let p = pulse(app.frame, 16);
+    let border_color = if app.connected {
+        mix((0, 150, 90), (60, 255, 180), p)
+    } else {
+        mix((120, 0, 0), (255, 50, 50), p)
+    };
+    let live = if app.connected { spinner(app.frame) } else { "○" };
+    let title = format!(" {} HIVEMIND  ⟐  hub up {}  ·  pid {}  ·  proto v{} ", live, up, app.hub_pid, app.hub_protocol);
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Double)
         .border_style(Style::new().fg(border_color))
         .title(Span::styled(title, Style::new().fg(border_color).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
@@ -195,8 +201,15 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
 fn draw_card(f: &mut Frame, area: Rect, app: &App, idx: usize) {
     let g = &app.groups[idx];
     let selected = idx == app.selected;
-    let border_style = if selected {
-        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    let flash = app.flash.get(&g.group.id).copied().unwrap_or(0);
+    let border_style = if flash > 0 {
+        // Bright cyan that fades as the flash decays — the card "lights up" the
+        // instant its hive does anything.
+        let t = flash as f32 / FLASH_FRAMES as f32;
+        Style::new().fg(mix((40, 90, 110), (80, 255, 255), t)).add_modifier(Modifier::BOLD)
+    } else if selected {
+        // Gently pulsing amber so the selection is alive, not static.
+        Style::new().fg(mix((140, 110, 0), (255, 220, 0), pulse(app.frame, 12))).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(Color::Gray)
     };
@@ -222,7 +235,7 @@ fn draw_card(f: &mut Frame, area: Rect, app: &App, idx: usize) {
     ])
     .split(inner);
 
-    draw_instances(f, parts[0], g, app.hub_now);
+    draw_instances(f, parts[0], g, app.hub_now, app.frame);
     draw_task_gauge(f, parts[1], g);
     draw_counts(f, parts[2], g);
     draw_card_spark(f, parts[3], &g.group.id, app, true);
@@ -230,18 +243,23 @@ fn draw_card(f: &mut Frame, area: Rect, app: &App, idx: usize) {
     draw_feed(f, parts[5], g);
 }
 
-fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64) {
+fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u64) {
     let mut lines: Vec<Line> = Vec::new();
     let max_rows = area.height as usize;
     let show = g.agents.len().min(max_rows.saturating_sub(if g.agents.len() > max_rows { 1 } else { 0 }));
     for a in g.agents.iter().take(show) {
         let age = now - a.last_seen;
-        let dot_color = if age < 20_000 {
-            Color::Green
+        let working = a.current_task.is_some();
+        // A spinning marker for instances actively on a task; a softly pulsing
+        // green dot for fresh presence; amber/red as it goes stale.
+        let (dot, dot_color) = if working {
+            (spinner(frame).to_string(), Color::Yellow)
+        } else if age < 20_000 {
+            ("●".to_string(), mix((0, 110, 0), (90, 255, 90), pulse(frame, 20)))
         } else if age < 60_000 {
-            Color::Yellow
+            ("●".to_string(), Color::Yellow)
         } else {
-            Color::Red
+            ("●".to_string(), Color::Red)
         };
         // Prefer showing the current task; fall back to a non-idle status.
         let (doing, doing_color) = if let Some(t) = &a.current_task {
@@ -252,7 +270,7 @@ fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64) {
             (format!(" {}", trunc(&a.status, 16)), Color::DarkGray)
         };
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::new().fg(dot_color)),
+            Span::styled(format!("{} ", dot), Style::new().fg(dot_color)),
             Span::styled(trunc(&a.name, 13), Style::new().fg(Color::White)),
             Span::styled(doing, Style::new().fg(doing_color)),
         ]));
@@ -370,15 +388,17 @@ fn draw_focus(f: &mut Frame, area: Rect, app: &App) {
         None => return,
     };
     let title = format!(
-        " FOCUS · {} · {} instance(s) · {} task(s) ",
+        " {} FOCUS · {} · {} instance(s) · {} task(s) ",
+        spinner(app.frame),
         trunc(&g.group.label, 30),
         g.agents.len(),
         g.tasks.len()
     );
+    let accent = mix((150, 120, 0), (255, 225, 60), pulse(app.frame, 16));
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-        .title(Span::styled(title, Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        .border_type(BorderType::Double)
+        .border_style(Style::new().fg(accent).add_modifier(Modifier::BOLD))
+        .title(Span::styled(title, Style::new().fg(accent).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -390,7 +410,7 @@ fn draw_focus(f: &mut Frame, area: Rect, app: &App) {
     ])
     .split(inner);
 
-    draw_focus_instances(f, parts[0], g, app.hub_now);
+    draw_focus_instances(f, parts[0], g, app.hub_now, app.frame);
     draw_focus_tasks(f, parts[1], g);
 
     let bottom = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(parts[2]);
@@ -398,14 +418,24 @@ fn draw_focus(f: &mut Frame, area: Rect, app: &App) {
     draw_focus_changes(f, bottom[1], g, app.hub_now);
 }
 
-fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64) {
+fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u64) {
     let block = Block::bordered().border_style(Style::new().fg(Color::DarkGray)).title("instances");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let mut lines: Vec<Line> = Vec::new();
     for a in &g.agents {
         let age = now - a.last_seen;
-        let dot = if age < 20_000 { Color::Green } else if age < 60_000 { Color::Yellow } else { Color::Red };
+        let working = a.current_task.is_some();
+        let (dot, dot_color) = if working {
+            (format!("{} ", spinner(frame)), Color::Yellow)
+        } else if age < 20_000 {
+            ("● ".to_string(), mix((0, 110, 0), (90, 255, 90), pulse(frame, 20)))
+        } else if age < 60_000 {
+            ("● ".to_string(), Color::Yellow)
+        } else {
+            ("● ".to_string(), Color::Red)
+        };
+        let env = [a.client.as_str(), a.model.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("/");
         let caps = if a.capabilities.is_empty() { String::new() } else { format!(" {{{}}}", a.capabilities.join(",")) };
         let doing = match &a.current_task {
             Some(t) => format!(" ▶ {}", t),
@@ -413,11 +443,12 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64) {
             None => format!(" {}", a.status),
         };
         lines.push(Line::from(vec![
-            Span::styled("● ", Style::new().fg(dot)),
+            Span::styled(dot, Style::new().fg(dot_color)),
             Span::styled(format!("{:<16}", trunc(&a.name, 16)), Style::new().fg(Color::White)),
+            Span::styled(if env.is_empty() { String::new() } else { format!(" {}", trunc(&env, 20)) }, Style::new().fg(Color::Green)),
             Span::styled(caps, Style::new().fg(Color::Cyan)),
             Span::styled(doing, Style::new().fg(Color::Yellow)),
-            Span::styled(format!("   {} ({})", path_tail(&a.cwd, 24), fmt_dur(now - a.last_seen)), Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("  ({})", fmt_dur(now - a.last_seen)), Style::new().fg(Color::DarkGray)),
         ]));
     }
     if lines.is_empty() {
@@ -569,6 +600,33 @@ fn path_tail(p: &str, n: usize) -> String {
     trunc(tail, n)
 }
 
+// --- animation helpers ------------------------------------------------------
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner(frame: u64) -> &'static str {
+    SPINNER[(frame as usize) % SPINNER.len()]
+}
+
+/// Triangle wave in [0,1] with the given period in frames.
+fn pulse(frame: u64, period: u64) -> f32 {
+    let p = (frame % period) as f32 / period as f32;
+    if p < 0.5 {
+        p * 2.0
+    } else {
+        2.0 - p * 2.0
+    }
+}
+
+fn lerp(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
+}
+
+/// Interpolate between two RGB colors by t in [0,1].
+fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> Color {
+    Color::Rgb(lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
+}
+
 fn fmt_dur(ms: i64) -> String {
     let s = (ms / 1000).max(0);
     if s < 60 {
@@ -601,8 +659,8 @@ mod tests {
         let mut g = Group::default();
         g.group = GroupRef { id: "g1".into(), label: "supercode".into() };
         g.agents = vec![
-            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), last_seen: 1_000_000 },
-            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), capabilities: vec!["frontend".into()], current_task: None, last_seen: 985_000 },
+            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), client: "claude-code".into(), model: "opus".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), last_seen: 1_000_000 },
+            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), client: "opencode".into(), model: "gpt-5".into(), capabilities: vec!["frontend".into()], current_task: None, last_seen: 985_000 },
         ];
         g.tasks = vec![
             Task { id: "t1".into(), title: "wire button".into(), status: "done".into(), claimed_by: Some("swift-otter".into()), ready: false, ..Default::default() },
@@ -665,6 +723,19 @@ mod tests {
             let mut app = fake_app();
             app.focused = true;
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn animation_frames_render_without_panic() {
+        let mut app = fake_app();
+        app.flash.insert("g1".into(), FLASH_FRAMES);
+        // Advance through a full spinner/pulse cycle in both views.
+        for i in 0..40 {
+            app.animate();
+            app.focused = i % 2 == 0;
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| draw(f, &app)).unwrap();
         }
     }

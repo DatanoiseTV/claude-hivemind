@@ -75,6 +75,7 @@ pub struct GroupRef {
     pub label: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
@@ -84,6 +85,10 @@ pub struct Agent {
     pub cwd: String,
     #[serde(default)]
     pub status: String,
+    #[serde(default)]
+    pub client: String,
+    #[serde(default)]
+    pub model: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
