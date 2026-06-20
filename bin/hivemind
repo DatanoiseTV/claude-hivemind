@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Convenience launcher for the Hivemind tooling.
+#
+#   hivemind monitor      open the ratatui dashboard (builds it on first run)
+#   hivemind status       one-shot snapshot of all hives
+#   hivemind watch        simple line-based live view (no build needed)
+#   hivemind groups       list active project hives
+#   hivemind stop         shut the hub down
+#   hivemind where        print socket / log paths
+#
+# Everything except `monitor` is a thin wrapper over the Node CLI, so it works
+# with no build step. `monitor` is the Rust + ratatui dashboard.
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cmd="${1:-status}"
+
+case "$cmd" in
+  monitor|dashboard|tui)
+    bin="$ROOT/monitor/target/release/hivemind-monitor"
+    if [[ ! -x "$bin" ]]; then
+      echo "Building the monitor (one-time)…" >&2
+      if command -v cargo >/dev/null 2>&1; then
+        (cd "$ROOT/monitor" && cargo build --release)
+      else
+        echo "cargo not found. Install Rust (https://rustup.rs) or use: hivemind watch" >&2
+        exit 1
+      fi
+    fi
+    exec "$bin"
+    ;;
+  *)
+    exec node "$ROOT/src/cli.js" "$@"
+    ;;
+esac

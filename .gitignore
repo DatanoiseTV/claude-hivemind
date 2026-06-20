@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+
+# Rust build output (Cargo.lock is committed — this ships a binary)
+monitor/target/
