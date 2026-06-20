@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-06-20
+
+Subagents can collaborate with each other.
+
+### Added
+
+- **Named participants (mailboxes).** A lightweight identity that isn't tied to a
+  socket, so multiple agents launched inside one Claude Code session (via the
+  Task/Agent tool) can message each other as distinct peers. `send`, `broadcast`,
+  `inbox`, and `wait` take an `as` field; a recipient name with no live connection
+  gets its own mailbox it can drain or long-poll. Active participants show up in
+  `peers`/`whoami` and the monitor's focus view, and are reaped when idle.
+- **CLI `inbox`** command and `/hivemind:hive-team` command for orchestrating a
+  team of coordinating subagents. INTEGRATIONS.md documents the pattern.
+
+### Changed
+
+- An explicit `as` now overrides the connection's identity for the actor name, so
+  a subagent's actions are attributed to it across both the MCP tools and the CLI.
+
 ## [0.4.0] — 2026-06-20
 
 Filesystem awareness, and an explicit no-auto-dispatch guarantee.

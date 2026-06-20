@@ -120,6 +120,7 @@ natural language ("ask the other instance to take the frontend") or the commands
 | `/hivemind:hive-status` | Full board: peers, tasks, shared context, locks |
 | `/hivemind:hive-plan <goal>` | Split a goal into tasks on the shared board |
 | `/hivemind:hive-worker` | Claim and execute tasks until the board is empty |
+| `/hivemind:hive-team <goal>` | Spawn subagents that coordinate via the hive |
 | `/hivemind:hive-sync [intent]` | Announce intent, gather peers' before acting |
 | `/hivemind:hive-broadcast <msg>` | Message every instance in the hive |
 | `/hivemind:hive-share <key> :: <ctx>` | Publish shared context to the blackboard |
@@ -143,6 +144,13 @@ Awareness: `changes`, `status`.
 `wait` is the real-time primitive: an instance blocks on it and returns the
 instant a relevant event arrives (a message, or a *ready* task for a worker), so
 instances synchronize like a real team rather than polling.
+
+**Subagents can talk to each other too.** Agents launched inside one session
+(Claude Code's Task tool) share its hive connection, so each takes a distinct
+**sub-identity** (`as: "<name>"` on any tool, or `HIVEMIND_NAME` with the CLI) and
+gets its own mailbox — `send`/`inbox`/`wait` by name. So a research subagent can
+hand a finding to a builder subagent mid-flight instead of only reporting back at
+the end. See [INTEGRATIONS.md](INTEGRATIONS.md) and `/hivemind:hive-team`.
 
 **The task board is a dependency graph, not a flat list.** A task with `deps`
 only becomes claimable once those dependencies are `done`, so a whole plan can be

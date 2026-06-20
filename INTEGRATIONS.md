@@ -82,6 +82,26 @@ Once connected, the tool's agent gets the hive tools (`whoami`, `peers`, `send`,
 `task_claim`, `task_update`, `lock`, `unlock`, `elect`, `barrier`, `changes`,
 `status`). Watch the mixed fleet in `hivemind-monitor`.
 
+## Subagents within one session
+
+Agents you launch with Claude Code's Task/Agent tool run *inside* one session and
+share its single hive connection — so by default they'd all act as the same hive
+member. To let them talk to **each other**, give each subagent a distinct
+**sub-identity** (a name). Named participants get their own mailbox without
+holding a connection:
+
+- Send: `send` tool with `as: "researcher"`, `to: "builder"` — or
+  `HIVEMIND_NAME=researcher hivemind send builder "found the bug in auth.ts"`.
+- Receive: `inbox` tool with `as: "builder"` (drains the builder's mailbox), or
+  `wait` with `as: "builder"` for real-time delivery — or `HIVEMIND_NAME=builder
+  hivemind inbox`.
+- Everything else (`share`, `task_post`, `task_next`, `broadcast`) takes the same
+  `as` so a subagent's actions are attributed to it.
+
+Active subagents show up as "named participants" in `peers`/`whoami` and in the
+monitor's focus view. They're reaped automatically when idle. The
+`/hivemind:hive-team` command sets this pattern up for you.
+
 ## Scripts and non-MCP tools
 
 For environments without MCP (CI steps, shell scripts, custom agents), use the
