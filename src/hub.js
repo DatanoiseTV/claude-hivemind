@@ -50,6 +50,7 @@ const MAX_BARRIER_MS = 60 * 60 * 1000; // longest a barrier may hold
 const PERSIST_DEBOUNCE_MS = 1500; // coalesce durable-state writes
 const ACTIVE_MAILBOX_MS = 5 * 60 * 1000; // a named participant counts as "present" if used within this
 const MAILBOX_TTL_MS = 30 * 60 * 1000; // reap idle, empty named mailboxes
+const MIRROR_TTL_MS = 2 * 60 * 60 * 1000; // drop mirrored tasks from long-silent sessions
 
 function log(msg) {
   process.stderr.write(`[hub ${new Date().toISOString()}] ${msg}\n`);
@@ -117,7 +118,8 @@ function persistNow(group) {
     v: 1,
     label: group.label,
     taskSeq: group.taskSeq,
-    tasks: group.tasks,
+    // Mirrored tasks reflect a live session's plan; never persist them.
+    tasks: group.tasks.filter((t) => !t.mirrored),
     notes: [...group.notes.entries()],
     stats: group.stats,
     savedAt: C.now(),
@@ -213,6 +215,9 @@ function unmetDeps(group, task) {
 }
 
 function taskReady(group, task) {
+  // Mirrored tasks reflect another instance's own plan — they show on the board
+  // for awareness but are never claimable work for others.
+  if (task.mirrored) return false;
   return task.status === 'open' && unmetDeps(group, task).length === 0;
 }
 
@@ -720,6 +725,76 @@ const OPS = {
     schedulePersist(g);
     pumpWaiters(g); // a completed dep may unblock other tasks -> wake workers
     return { task: { ...task, ready: taskReady(g, task) } };
+  },
+
+  // Mirror an instance's native task/todo list onto the board so it fills from
+  // the planning agents already do — no new habit, no token cost (hook-driven).
+  // Mirrored tasks are owned by a session, are never claimable by others, and are
+  // not persisted. kind: 'create' | 'update' | 'list'.
+  mirror_tasks(msg, cs) {
+    const g = getGroup(msg.group, msg.groupLabel);
+    const owner = msg.sessionKey;
+    if (!owner) return {};
+    const who = msg.who || owner;
+    const mapStatus = (s) =>
+      ({ pending: 'open', in_progress: 'in_progress', completed: 'done' }[s] || 'open');
+    const findM = (nativeId) => g.tasks.find((t) => t.mirrored && t.owner === owner && t.nativeId === nativeId);
+    const removeM = (nativeId) => {
+      const i = g.tasks.findIndex((t) => t.mirrored && t.owner === owner && t.nativeId === nativeId);
+      if (i >= 0) g.tasks.splice(i, 1);
+    };
+    const upsert = (item) => {
+      const nativeId = String(item.nativeId || '');
+      if (!nativeId) return;
+      if (item.status === 'deleted') return removeM(nativeId);
+      let t = findM(nativeId);
+      if (!t) {
+        t = {
+          id: `~m${++g.taskSeq}`,
+          title: '',
+          detail: '',
+          status: 'open',
+          priority: 0,
+          tags: [],
+          deps: [],
+          by: who,
+          claimedBy: who,
+          mirrored: true,
+          owner,
+          nativeId,
+          createdAt: C.now(),
+          updatedAt: C.now(),
+          log: [],
+        };
+        g.tasks.push(t);
+      }
+      if (item.subject) t.title = String(item.subject).slice(0, 1000);
+      if (item.status) t.status = mapStatus(item.status);
+      if (Array.isArray(item.blockedBy)) t.blockedByNative = item.blockedBy.map(String);
+      t.updatedAt = C.now();
+    };
+
+    if (msg.kind === 'list') {
+      const items = Array.isArray(msg.items) ? msg.items : [];
+      const keep = new Set(items.map((it) => String(it.nativeId || '')));
+      // Reconcile: drop this owner's mirrored tasks no longer in the snapshot.
+      for (const t of [...g.tasks]) {
+        if (t.mirrored && t.owner === owner && !keep.has(t.nativeId)) removeM(t.nativeId);
+      }
+      for (const it of items) upsert(it);
+    } else {
+      upsert(msg.item || {});
+    }
+    pruneTasks(g);
+    return { ok: true };
+  },
+
+  // Drop all mirrored tasks for a session (its window closed).
+  mirror_clear(msg, cs) {
+    const g = msg.group ? getGroup(msg.group, msg.groupLabel) : groups.get(cs.groupId);
+    if (!g || !msg.sessionKey) return {};
+    g.tasks = g.tasks.filter((t) => !(t.mirrored && t.owner === msg.sessionKey));
+    return {};
   },
 
   // Advisory locks -----------------------------------------------------------
@@ -1245,6 +1320,10 @@ function sweep() {
     for (const [name, m] of g.mailboxes) {
       if (!m.messages.length && nowTs - m.lastSeen > MAILBOX_TTL_MS) g.mailboxes.delete(name);
     }
+    // Drop mirrored tasks from sessions that went silent (no SessionEnd fired).
+    const before = g.tasks.length;
+    g.tasks = g.tasks.filter((t) => !(t.mirrored && nowTs - (t.updatedAt || 0) > MIRROR_TTL_MS));
+    if (g.tasks.length !== before) { /* pruned stale mirrored tasks */ }
   }
   if (totalAgents() === 0 && nowTs - lastAgentSeenAt > IDLE_SHUTDOWN_MS) {
     log('idle with no agents — shutting down');

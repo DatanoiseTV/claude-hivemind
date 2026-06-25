@@ -44,6 +44,16 @@
             "timeout": 6
           }
         ]
+      },
+      {
+        "matcher": "TaskCreate|TaskUpdate|TaskList",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/task-mirror.js\"",
+            "timeout": 6
+          }
+        ]
       }
     ],
     "SessionEnd": [
