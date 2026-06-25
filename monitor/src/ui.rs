@@ -71,6 +71,9 @@ fn draw_header_stats(f: &mut Frame, area: Rect, app: &App) {
     let mut edits = 0u64;
     for g in &app.groups {
         for t in &g.tasks {
+            if t.mirrored {
+                continue; // mirrored plans aren't part of the shared work queue
+            }
             total_tasks += 1;
             match t.status.as_str() {
                 "open" => open += 1,
@@ -308,7 +311,12 @@ fn draw_counts(f: &mut Frame, area: Rect, g: &Group) {
     let mut blocked = 0;
     let mut wip = 0;
     let mut done = 0;
+    let mut plans = 0; // mirrored native-task-list items (awareness, not claimable)
     for t in &g.tasks {
+        if t.mirrored {
+            plans += 1;
+            continue;
+        }
         match t.status.as_str() {
             "open" => {
                 if t.ready {
@@ -322,7 +330,7 @@ fn draw_counts(f: &mut Frame, area: Rect, g: &Group) {
             _ => {}
         }
     }
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{} ready", ready), Style::new().fg(Color::Cyan)),
         Span::raw(" "),
         Span::styled(format!("{} blkd", blocked), Style::new().fg(Color::DarkGray)),
@@ -330,9 +338,12 @@ fn draw_counts(f: &mut Frame, area: Rect, g: &Group) {
         Span::styled(format!("{} wip", wip), Style::new().fg(Color::Yellow)),
         Span::raw(" "),
         Span::styled(format!("{} done", done), Style::new().fg(Color::Green)),
-        Span::styled(format!("  L{} C{}", g.locks.len(), g.notes.len()), Style::new().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+    if plans > 0 {
+        spans.push(Span::styled(format!("  ~{} plans", plans), Style::new().fg(Color::Rgb(120, 120, 170))));
+    }
+    spans.push(Span::styled(format!("  L{} C{}", g.locks.len(), g.notes.len()), Style::new().fg(Color::DarkGray)));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_card_spark(f: &mut Frame, area: Rect, group_id: &str, app: &App, is_msg: bool) {
@@ -484,15 +495,26 @@ fn draw_focus_tasks(f: &mut Frame, area: Rect, g: &Group) {
     let cap = inner.height as usize;
     let mut lines: Vec<Line> = Vec::new();
     for t in tasks.iter().take(cap) {
-        let (label, color) = match t.status.as_str() {
-            "open" if t.ready => ("READY  ".to_string(), Color::Cyan),
-            "open" => (format!("BLK<{}>", t.blocked_by.join(",")), Color::DarkGray),
-            "claimed" | "in_progress" => ("WIP    ".to_string(), Color::Yellow),
-            "done" => ("DONE   ".to_string(), Color::Green),
-            "failed" => ("FAIL   ".to_string(), Color::Red),
-            other => (other.to_string(), Color::Gray),
+        // Mirrored tasks are someone's live plan (not claimable work) — shown
+        // dimmed with a ~ so they're visually distinct from the shared queue.
+        let (label, color) = if t.mirrored {
+            let s = match t.status.as_str() { "in_progress" => "doing", "done" => "done", _ => "todo" };
+            (format!("~{:<6}", s), Color::Rgb(120, 120, 170))
+        } else {
+            match t.status.as_str() {
+                "open" if t.ready => ("READY  ".to_string(), Color::Cyan),
+                "open" => (format!("BLK<{}>", t.blocked_by.join(",")), Color::DarkGray),
+                "claimed" | "in_progress" => ("WIP    ".to_string(), Color::Yellow),
+                "done" => ("DONE   ".to_string(), Color::Green),
+                "failed" => ("FAIL   ".to_string(), Color::Red),
+                other => (other.to_string(), Color::Gray),
+            }
         };
-        let owner = t.claimed_by.as_deref().map(|o| format!(" @{}", o)).unwrap_or_default();
+        let owner = if t.mirrored {
+            t.owner.as_deref().map(|o| format!(" @{}", o)).unwrap_or_default()
+        } else {
+            t.claimed_by.as_deref().map(|o| format!(" @{}", o)).unwrap_or_default()
+        };
         let prio = if t.priority != 0 { format!(" p{}", t.priority) } else { String::new() };
         let tags = if t.tags.is_empty() { String::new() } else { format!(" #{}", t.tags.join(" #")) };
         lines.push(Line::from(vec![
@@ -670,6 +692,7 @@ mod tests {
             Task { id: "t2".into(), title: "add api".into(), status: "open".into(), claimed_by: None, ready: false, blocked_by: vec!["t1".into()], priority: 2, ..Default::default() },
             Task { id: "t3".into(), title: "tests".into(), status: "claimed".into(), claimed_by: Some("keen-lynx".into()), tags: vec!["rust".into()], ..Default::default() },
             Task { id: "t4".into(), title: "ready work".into(), status: "open".into(), ready: true, ..Default::default() },
+            Task { id: "~m1".into(), title: "draft the outline".into(), status: "in_progress".into(), mirrored: true, owner: Some("keen-lynx:ab".into()), ..Default::default() },
         ];
         g.participants = vec![Participant { name: "sub-frontend".into(), pending: 1 }];
         g.activity = vec![Activity { from_name: "swift-otter".into(), body: "claimed t3".into(), kind: "task".into(), ts: 1_000_000 }];
@@ -719,6 +742,8 @@ mod tests {
         assert!(s.contains("task board"), "task board panel shown");
         assert!(s.contains("recent file edits"), "changes panel shown");
         assert!(s.contains("READY"), "ready task state shown");
+        assert!(s.contains("draft the outline"), "mirrored (plan) task shown");
+        assert!(s.contains('~'), "mirrored task carries the ~ marker");
     }
 
     #[test]

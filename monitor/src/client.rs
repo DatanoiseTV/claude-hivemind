@@ -123,6 +123,10 @@ pub struct Task {
     pub blocked_by: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub mirrored: bool,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 // The following types mirror the full hub wire format. Some fields are not
