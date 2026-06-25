@@ -1,6 +1,6 @@
 {
   "name": "claude-hivemind",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "commonjs",
   "description": "Real-time coordination backbone that lets multiple Claude Code instances in the same project collaborate as one hive.",
@@ -8,7 +8,7 @@
     "hivemind": "bin/hivemind"
   },
   "scripts": {
-    "test": "node test/integration.js && node test/mcp-smoke.js && node test/durability.js && node test/watcher.js && node test/reconnect.js && node test/dispatch.js && node test/mirror.js",
+    "test": "node test/integration.js && node test/mcp-smoke.js && node test/durability.js && node test/watcher.js && node test/reconnect.js && node test/dispatch.js && node test/mirror.js && node test/observe.js",
     "test:engine": "node test/integration.js",
     "test:mcp": "node test/mcp-smoke.js",
     "monitor:build": "cargo build --release --manifest-path monitor/Cargo.toml",
@@ -19,7 +19,8 @@
     "test:watch": "node test/watcher.js",
     "test:reconnect": "node test/reconnect.js",
     "test:dispatch": "node test/dispatch.js",
-    "test:mirror": "node test/mirror.js"
+    "test:mirror": "node test/mirror.js",
+    "test:observe": "node test/observe.js"
   },
   "engines": {
     "node": ">=18"

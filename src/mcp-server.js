@@ -18,7 +18,7 @@ const { PersistentClient } = require('./lib/hub-client');
 const { detectInputChannel, inject } = require('./lib/inject');
 
 const SERVER_NAME = 'hivemind';
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.8.0';
 const DEFAULT_PROTOCOL = '2025-06-18';
 
 function logErr(msg) {
@@ -63,6 +63,9 @@ const client = new PersistentClient({ agent, log: logErr });
 // Begin connecting immediately so the first tool call is fast. Failure here is
 // non-fatal; tool calls retry the connection.
 client.ensureConnected().catch((e) => logErr(`initial connect deferred: ${e.message}`));
+
+// Cursor for the `observe` tool, so each call returns only what's new.
+let lastObserveTs = 0;
 
 // --- Formatting helpers -----------------------------------------------------
 
@@ -491,6 +494,51 @@ const TOOLS = [
           `Shared context:\n${notes}\n\n` +
           `Locks:\n${locks}`
       );
+    },
+  },
+  {
+    name: 'observe',
+    description:
+      'One-call situational awareness for an Observe-Orient-Decide-Act loop: returns everything that changed in the hive since your last observe (new messages, task changes, file changes, updated shared context, hive activity) plus what is ready to claim and who is active. Call it at the top of each iteration; re-orient from what it shows (the situation may have moved — a peer finished work, files changed, the plan may no longer fit) before deciding your next action.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async handler() {
+      const r = await client.request('observe', { sinceTs: lastObserveTs });
+      lastObserveTs = r.nowTs || C.now();
+      const parts = [];
+      const m = fmtMessages(r.messages);
+      if (m) parts.push(`Messages (${r.messages.length}):\n${m}`);
+      if (r.taskChanges && r.taskChanges.length) {
+        parts.push(
+          `Task changes (${r.taskChanges.length}):\n` +
+            r.taskChanges
+              .map((t) => `- [${t.id}] ${t.status}${t.claimedBy ? ` @${t.claimedBy}` : ''}${t.mirrored ? ' ~plan' : ''}: ${t.title}`)
+              .join('\n')
+        );
+      }
+      if (r.readyTasks && r.readyTasks.length) {
+        parts.push(
+          `Ready to claim (${r.readyTasks.length}):\n` +
+            r.readyTasks.map((t) => `- [${t.id}]${t.priority ? ` p${t.priority}` : ''} ${t.title}`).join('\n')
+        );
+      }
+      if (r.fileChanges && r.fileChanges.length) {
+        parts.push(
+          `File changes (${r.fileChanges.length}):\n` +
+            r.fileChanges.slice(-12).map((c) => `- ${c.who} ${c.tool} ${c.file}`).join('\n')
+        );
+      }
+      if (r.contextChanges && r.contextChanges.length) {
+        parts.push(
+          `Shared context updated (${r.contextChanges.length}):\n` +
+            r.contextChanges.map((n) => `- ${n.key}${n.summary ? ` — ${n.summary}` : ''} (by ${n.by})`).join('\n')
+        );
+      }
+      if (r.feed && r.feed.length) {
+        parts.push('Hive activity:\n' + r.feed.slice(-8).map((b) => `- ${b.fromName}: ${b.body}`).join('\n'));
+      }
+      const peerCount = (r.peers || []).length;
+      const head = `Situation — ${peerCount} peer(s) active.`;
+      return text(parts.length ? `${head}\n\n${parts.join('\n\n')}` : `${head}\nNothing has changed since your last observe.`);
     },
   },
   {

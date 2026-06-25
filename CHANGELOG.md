@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-06-25
+
+### Added
+
+- **`observe` tool** — one-call situational awareness for an Observe-Orient-
+  Decide-Act loop. Returns everything that changed in the hive since the caller's
+  cursor (new messages, task changes, file changes, updated shared context, hive
+  activity) plus what's ready to claim and who's active, and advances the cursor
+  so each call is just the delta. Turns the hive's scattered awareness surface
+  (presence, messages, fs watcher, change feed, board, context) into a single
+  cheap sensor sweep.
+- **`/hivemind:hive-ooda <goal>`** — drive a goal with a tight Observe-Orient-
+  Decide-Act loop, emphasizing *re-orientation* (noticing when reality moved and
+  changing the plan rather than marching a stale one) and bounded so it doesn't
+  spin. Domain-agnostic.
+
 ## [0.7.0] — 2026-06-25
 
 ### Added

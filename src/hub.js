@@ -959,6 +959,33 @@ const OPS = {
     return { hub, groups: [...groups.values()].map(snapshot) };
   },
 
+  // Consolidated situational awareness for an OODA-style loop: one call returns
+  // everything that changed since the caller's cursor (sinceTs) plus what's
+  // actionable now. Drains the caller's inbox (those messages are "observed");
+  // everything else is cursor-based and re-queryable. Returns nowTs as the next
+  // cursor.
+  observe(msg, cs) {
+    const g = requireGroup(msg, cs);
+    const since = Number(msg.sinceTs) || 0;
+    const nowTs = C.now();
+    const box = g.inboxes.get(cs.agentId) || [];
+    const messages = box.splice(0, box.length);
+    return {
+      nowTs,
+      messages,
+      taskChanges: g.tasks
+        .filter((t) => (t.updatedAt || 0) > since)
+        .map((t) => ({ id: t.id, title: t.title, status: t.status, claimedBy: t.claimedBy, mirrored: !!t.mirrored, ready: taskReady(g, t) })),
+      readyTasks: g.tasks
+        .filter((t) => taskReady(g, t))
+        .map((t) => ({ id: t.id, title: t.title, priority: t.priority || 0 })),
+      fileChanges: g.recentChanges.filter((c) => c.ts > since),
+      contextChanges: publicNotes(g).filter((n) => n.ts > since),
+      feed: g.broadcasts.filter((b) => b.ts > since),
+      peers: peersOf(g, cs.agentId),
+    };
+  },
+
   // Compact summary for hook context injection.
   digest(msg, cs) {
     const g = groups.get(msg.group);

@@ -122,6 +122,7 @@ natural language ("ask the other instance to take the frontend") or the commands
 | `/hivemind:hive-worker` | Claim and execute tasks until the board is empty |
 | `/hivemind:hive-team <goal>` | Spawn subagents that coordinate via the hive |
 | `/hivemind:hive-orchestrate <goal>` | Be the head of an iterative, multi-phase hive effort |
+| `/hivemind:hive-ooda <goal>` | Drive a goal with a tight Observe-Orient-Decide-Act loop |
 | `/hivemind:hive-sync [intent]` | Announce intent, gather peers' before acting |
 | `/hivemind:hive-broadcast <msg>` | Message every instance in the hive |
 | `/hivemind:hive-share <key> :: <ctx>` | Publish shared context to the blackboard |
@@ -140,7 +141,8 @@ Presence & messaging: `whoami`, `peers`, `send`, `broadcast`, `inbox`, `wait`.
 Shared context: `share`, `recall`. Task board: `task_post` (with `deps`,
 `priority`, `tags`), `task_list`, `task_next`, `task_claim`, `task_update`.
 Collision control: `lock`, `unlock`, `elect`, `release_role`. Sync: `barrier`.
-Awareness: `changes`, `status`.
+Awareness: `changes`, `status`, `observe` (one-call delta of everything that
+changed since you last looked — the sensor sweep for an OODA loop).
 
 `wait` is the real-time primitive: an instance blocks on it and returns the
 instant a relevant event arrives (a message, or a *ready* task for a worker), so
