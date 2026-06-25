@@ -21,6 +21,7 @@ function assert(cond, name) {
   passed++;
   console.log(`  ok  ${name}`);
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const group = { id: 'g_obs', label: 'obs', dir: '/tmp/obs' };
 const mk = (name) => ({ id: C.genId('a'), name, group: group.id, groupLabel: group.label, cwd: group.dir, pid: process.pid, model: '' });
 
@@ -50,6 +51,7 @@ async function main() {
     'observe with the cursor shows nothing stale'
   );
 
+  await sleep(5); // ensure the next change lands in a later ms than the cursor
   await b.request('share', { key: 'k2', value: 'v2' });
   const r3 = await a.request('observe', { sinceTs: cursor });
   assert(r3.contextChanges.some((n) => n.key === 'k2'), 'observe shows the new change after the cursor');

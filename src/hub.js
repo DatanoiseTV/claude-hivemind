@@ -900,15 +900,7 @@ const OPS = {
   record_change(msg, cs) {
     const g = getGroup(msg.group, msg.groupLabel);
     if (!msg.file) return {};
-    g.recentChanges.push({
-      who: msg.who || 'a peer',
-      file: msg.file,
-      tool: msg.tool || 'edit',
-      ts: C.now(),
-    });
-    if (g.recentChanges.length > MAX_CHANGES) {
-      g.recentChanges.splice(0, g.recentChanges.length - MAX_CHANGES);
-    }
+    recordChange(g, { who: msg.who || 'a peer', file: msg.file, tool: msg.tool || 'edit', ts: C.now() });
     // Remember this edit so the FS watcher can distinguish the agent's own write
     // from a genuinely external change to the same file.
     g.recentAgentEdits.set(msg.file, C.now());
@@ -981,7 +973,7 @@ const OPS = {
       readyTasks: g.tasks
         .filter((t) => taskReady(g, t))
         .map((t) => ({ id: t.id, title: t.title, priority: t.priority || 0 })),
-      fileChanges: g.recentChanges.filter((c) => c.ts > since),
+      fileChanges: g.recentChanges.filter((c) => c.ts > since).slice(-50),
       contextChanges: publicNotes(g).filter((n) => n.ts > since),
       feed: g.broadcasts.filter((b) => b.ts > since),
       peers: peersOf(g, cs.agentId),
@@ -1036,6 +1028,18 @@ function pushBroadcastFeed(group, fromName, body, kind) {
   group.broadcasts.push({ fromName, body, kind: kind || 'chat', ts: C.now() });
   if (group.broadcasts.length > MAX_BROADCASTS) {
     group.broadcasts.splice(0, group.broadcasts.length - MAX_BROADCASTS);
+  }
+}
+
+// Record a file change, deduped by path: a file rewritten over and over (build
+// outputs, logs, db files) collapses to a single latest entry instead of
+// flooding the feed. Bounded by MAX_CHANGES.
+function recordChange(group, entry) {
+  const i = group.recentChanges.findIndex((c) => c.file === entry.file);
+  if (i >= 0) group.recentChanges.splice(i, 1);
+  group.recentChanges.push(entry);
+  if (group.recentChanges.length > MAX_CHANGES) {
+    group.recentChanges.splice(0, group.recentChanges.length - MAX_CHANGES);
   }
 }
 
@@ -1121,10 +1125,7 @@ function handleFsBatch(group, paths, overflow) {
   if (!external.length) return;
 
   for (const p of external.slice(0, 60)) {
-    group.recentChanges.push({ who: 'filesystem', file: p, tool: 'fs', ts: nowTs });
-  }
-  if (group.recentChanges.length > MAX_CHANGES) {
-    group.recentChanges.splice(0, group.recentChanges.length - MAX_CHANGES);
+    recordChange(group, { who: 'filesystem', file: p, tool: 'fs', ts: nowTs });
   }
   group.stats.fsChanges += external.length;
 

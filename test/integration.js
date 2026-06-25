@@ -177,6 +177,13 @@ async function main() {
   r = await a.request('list_changes');
   assert(r.changes.some((c) => c.file === 'x.js'), 'recorded change appears in feed');
 
+  // Repeated changes to the same file are deduped (one latest entry), so a
+  // constantly-rewritten file can't flood the feed.
+  await quickRequest('record_change', { group: group.id, who: 'sess1', file: 'x.js', tool: 'Edit' }, { timeoutMs: 1000 });
+  await quickRequest('record_change', { group: group.id, who: 'sess1', file: 'x.js', tool: 'Edit' }, { timeoutMs: 1000 });
+  r = await a.request('list_changes');
+  assert(r.changes.filter((c) => c.file === 'x.js').length === 1, 'repeated changes to one file are deduped in the feed');
+
   r = await a.request('status', { group: group.id });
   assert(r.groups[0] && r.groups[0].agents.length === 2, 'status snapshot shows both instances');
   assert(typeof r.hub.startedAt === 'number', 'status includes hub meta for the dashboard');

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] — 2026-06-25
+
+### Fixed
+
+- **Filesystem change feed no longer piles up.** The feed now dedups by path —
+  a file rewritten over and over (build outputs, logs, db files) collapses to a
+  single latest entry instead of flooding the feed with hundreds of duplicates.
+  The ignore list is also much stronger (build/object outputs, db journals
+  `.db-wal`/`.db-shm`, source maps, `.vite`/`.angular`/`.astro`/`.dart_tool`/…,
+  pid/sock files, `cmake-build-*`), while meaningful files like `Cargo.lock` and
+  `yarn.lock` are kept. `observe` also caps how many file changes it returns.
+
 ## [0.8.1] — 2026-06-25
 
 ### Fixed

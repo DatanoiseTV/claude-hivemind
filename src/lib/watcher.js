@@ -22,18 +22,29 @@ const IGNORE_DIRS = new Set([
   'node_modules', '.git', 'target', 'dist', 'build', 'out', '.next', '.nuxt',
   '.cache', '__pycache__', '.venv', 'venv', 'coverage', '.idea', '.gradle',
   'vendor', '.terraform', '.pytest_cache', '.mypy_cache', '.svelte-kit', 'obj',
-  '.turbo', '.parcel-cache', 'Pods', 'DerivedData',
+  '.turbo', '.parcel-cache', 'Pods', 'DerivedData', '.vite', '.angular',
+  '.astro', '.docusaurus', '.expo', '.dart_tool', '.tox', '.eggs',
+  '.ruff_cache', '.ccls-cache', '.clangd', '.ipynb_checkpoints', 'tmp', '.tmp',
+  '.serverless', '.vercel', '.output', 'bower_components', 'jspm_packages',
 ]);
+
+// Noise file suffixes: build/object outputs, caches, db journals, coverage,
+// runtime files, source maps, editor temps — things that churn constantly and
+// carry no signal about what a human or agent is doing.
+const IGNORE_SUFFIX =
+  /\.(log|tmp|temp|swp|swo|swx|part|crdownload|pyc|pyo|class|o|obj|gcda|gcno|pid|sock|map|orig|rej|bak|db-wal|db-shm|db-journal|sqlite-wal|sqlite-shm|sqlite-journal)$/i;
 
 // True if a path (relative to the watched root) is noise we never surface.
 function isIgnored(rel, extra) {
   const parts = rel.split(path.sep).filter(Boolean);
   for (const p of parts) {
     if (IGNORE_DIRS.has(p)) return true;
+    // cmake-build-*, .gradle caches, etc.
+    if (/^cmake-build-/.test(p)) return true;
   }
   const base = parts[parts.length - 1] || '';
-  if (base === '.DS_Store') return true;
-  if (/\.(log|tmp|swp|swo|swx|part|crdownload)$/i.test(base)) return true;
+  if (base === '.DS_Store' || base === '.git') return true;
+  if (IGNORE_SUFFIX.test(base)) return true;
   if (base.endsWith('~')) return true;
   if (base.startsWith('.#')) return true; // emacs lockfiles
   if (extra && extra.length && extra.some((frag) => rel.includes(frag))) return true;
