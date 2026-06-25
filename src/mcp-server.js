@@ -18,7 +18,7 @@ const { PersistentClient } = require('./lib/hub-client');
 const { detectInputChannel, inject } = require('./lib/inject');
 
 const SERVER_NAME = 'hivemind';
-const SERVER_VERSION = '0.6.0';
+const SERVER_VERSION = '0.7.0';
 const DEFAULT_PROTOCOL = '2025-06-18';
 
 function logErr(msg) {

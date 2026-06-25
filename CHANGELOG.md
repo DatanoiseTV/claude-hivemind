@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-06-25
+
+### Added
+
+- **The task board now fills itself.** A `PostToolUse` hook on
+  `TaskCreate|TaskUpdate|TaskList` mirrors each instance's native task/todo list
+  onto the hive board automatically — so the board reflects what everyone is
+  actually planning and doing, with no new habit to learn and no token cost.
+  Mirrored tasks are owned by their session, shown for awareness but never
+  claimable as shared work, reconciled from list snapshots, and cleared when the
+  session ends. They appear dimmed with a `~` and as a `~N plans` count in the
+  monitor, kept separate from the claimable work-stealing queue.
+- **`/hivemind:hive-orchestrate <goal>`** — run an iterative, multi-phase effort
+  as the "head" of the hive: claim the head role, frame the goal, delegate
+  planning, decompose into a phased task graph (deps + tags), recruit workers or
+  subagents, review, synthesize, and loop. Domain-agnostic — works for coding and
+  non-coding goals alike.
+
 ## [0.6.0] — 2026-06-20
 
 ### Added

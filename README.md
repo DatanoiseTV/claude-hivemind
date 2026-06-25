@@ -121,6 +121,7 @@ natural language ("ask the other instance to take the frontend") or the commands
 | `/hivemind:hive-plan <goal>` | Split a goal into tasks on the shared board |
 | `/hivemind:hive-worker` | Claim and execute tasks until the board is empty |
 | `/hivemind:hive-team <goal>` | Spawn subagents that coordinate via the hive |
+| `/hivemind:hive-orchestrate <goal>` | Be the head of an iterative, multi-phase hive effort |
 | `/hivemind:hive-sync [intent]` | Announce intent, gather peers' before acting |
 | `/hivemind:hive-broadcast <msg>` | Message every instance in the hive |
 | `/hivemind:hive-share <key> :: <ctx>` | Publish shared context to the blackboard |
@@ -151,6 +152,12 @@ instances synchronize like a real team rather than polling.
 gets its own mailbox — `send`/`inbox`/`wait` by name. So a research subagent can
 hand a finding to a builder subagent mid-flight instead of only reporting back at
 the end. See [INTEGRATIONS.md](INTEGRATIONS.md) and `/hivemind:hive-team`.
+
+**The board fills itself.** Beyond tasks you post explicitly, each instance's
+native task/todo list (TaskCreate/TaskUpdate/TaskList) is mirrored onto the board
+automatically via a hook — so the board reflects what everyone is actually
+planning, with no extra effort. Mirrored items are shown for awareness (dimmed,
+`~`) but stay separate from the claimable work-stealing queue.
 
 **The task board is a dependency graph, not a flat list.** A task with `deps`
 only becomes claimable once those dependencies are `done`, so a whole plan can be
