@@ -98,6 +98,8 @@ pub struct Agent {
     #[serde(default)]
     pub dispatchable: bool,
     #[serde(default)]
+    pub last_active_at: i64,
+    #[serde(default)]
     pub last_seen: i64,
 }
 

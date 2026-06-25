@@ -261,10 +261,14 @@ fn draw_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u64) {
         } else {
             ("●".to_string(), Color::Red)
         };
-        // Prefer showing the current task; fall back to a non-idle status.
+        // Current hive task if any; else "active" when it recently used a hive
+        // tool; else just present (no misleading "idle").
+        let active = a.last_active_at > 0 && now - a.last_active_at < 30_000;
         let (doing, doing_color) = if let Some(t) = &a.current_task {
             (format!(" ▶{}", t), Color::Yellow)
-        } else if a.status.is_empty() || a.status == "idle" || a.status == "active" {
+        } else if active {
+            (" active".to_string(), NEON_GREEN)
+        } else if a.status.is_empty() || a.status == "idle" {
             (String::new(), Color::DarkGray)
         } else {
             (format!(" {}", trunc(&a.status, 16)), Color::DarkGray)
@@ -445,10 +449,12 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u
         let env = [a.client.as_str(), a.model.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("/");
         let caps = if a.capabilities.is_empty() { String::new() } else { format!(" {{{}}}", a.capabilities.join(",")) };
         let disp = if a.dispatchable { " ⌨" } else { "" };
-        let doing = match &a.current_task {
-            Some(t) => format!(" ▶ {}", t),
-            None if a.status.is_empty() || a.status == "idle" => " idle".into(),
-            None => format!(" {}", a.status),
+        let active = a.last_active_at > 0 && now - a.last_active_at < 30_000;
+        let (doing, doing_color) = match &a.current_task {
+            Some(t) => (format!(" ▶ {}", t), Color::Yellow),
+            None if active => (" active".into(), NEON_GREEN),
+            None if a.status.is_empty() || a.status == "idle" => (" online".into(), Color::DarkGray),
+            None => (format!(" {}", a.status), Color::DarkGray),
         };
         lines.push(Line::from(vec![
             Span::styled(dot, Style::new().fg(dot_color)),
@@ -456,7 +462,7 @@ fn draw_focus_instances(f: &mut Frame, area: Rect, g: &Group, now: i64, frame: u
             Span::styled(if env.is_empty() { String::new() } else { format!(" {}", trunc(&env, 20)) }, Style::new().fg(Color::Green)),
             Span::styled(caps, Style::new().fg(Color::Cyan)),
             Span::styled(disp, Style::new().fg(AMBER)),
-            Span::styled(doing, Style::new().fg(Color::Yellow)),
+            Span::styled(doing, Style::new().fg(doing_color)),
             Span::styled(format!("  ({})", fmt_dur(now - a.last_seen)), Style::new().fg(Color::DarkGray)),
         ]));
     }
@@ -684,8 +690,8 @@ mod tests {
         let mut g = Group::default();
         g.group = GroupRef { id: "g1".into(), label: "supercode".into() };
         g.agents = vec![
-            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), client: "claude-code".into(), model: "opus".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), dispatchable: true, last_seen: 1_000_000 },
-            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), client: "opencode".into(), model: "gpt-5".into(), capabilities: vec!["frontend".into()], current_task: None, dispatchable: false, last_seen: 985_000 },
+            Agent { name: "swift-otter".into(), cwd: "/tmp/supercode/src".into(), status: "on t3".into(), client: "claude-code".into(), model: "opus".into(), capabilities: vec!["rust".into()], current_task: Some("t3".into()), dispatchable: true, last_active_at: 1_000_000, last_seen: 1_000_000 },
+            Agent { name: "keen-lynx".into(), cwd: "/tmp/supercode".into(), status: "idle".into(), client: "opencode".into(), model: "gpt-5".into(), capabilities: vec!["frontend".into()], current_task: None, dispatchable: false, last_active_at: 990_000, last_seen: 985_000 },
         ];
         g.tasks = vec![
             Task { id: "t1".into(), title: "wire button".into(), status: "done".into(), claimed_by: Some("swift-otter".into()), ready: false, ..Default::default() },

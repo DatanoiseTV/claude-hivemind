@@ -186,6 +186,7 @@ function publicAgent(a) {
     capabilities: a.capabilities || [],
     currentTask: a.currentTask || null,
     dispatchable: !!a.inputChannel,
+    lastActiveAt: a.lastActiveAt || 0,
     joinedAt: a.joinedAt,
     lastSeen: a.lastSeen,
   };
@@ -459,6 +460,7 @@ const OPS = {
       client: (agent.client || '').slice(0, 40),
       model: (agent.model || '').slice(0, 60),
       status: 'idle',
+      lastActiveAt: 0, // last non-heartbeat hive activity (honest "active" signal)
       inputChannel: agent.inputChannel || null, // set => remote-controllable via dispatch
       capabilities: Array.isArray(agent.capabilities) ? agent.capabilities.slice(0, 32) : [],
       currentTask: null,
@@ -1244,9 +1246,14 @@ function onConnection(sock) {
         reply(sock, msg.id, { ok: false, error: `unknown op: ${msg.op}` });
         return;
       }
-      // Touch liveness on any traffic from a registered agent.
+      // Touch liveness on any traffic from a registered agent; a non-heartbeat
+      // op means the agent is actively using the hive (real activity, vs the
+      // 15s keepalive), which is the honest per-agent "active" signal.
       const a = currentAgent(cs);
-      if (a) a.lastSeen = C.now();
+      if (a) {
+        a.lastSeen = C.now();
+        if (msg.op !== 'heartbeat') a.lastActiveAt = C.now();
+      }
       const result = fn(msg, cs) || {};
       reply(sock, msg.id, { ok: true, ...result });
     } catch (e) {

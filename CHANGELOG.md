@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — 2026-06-25
+
+### Fixed
+
+- **Instances no longer always read "idle" in the monitor.** An instance's status
+  only ever changed when it claimed a hive task, so with the board unused every
+  instance sat at the registration default. Now the hub tracks real per-agent
+  activity (any non-heartbeat hive op), and the monitor shows `▶task` when on hive
+  work, `active` when it recently used a hive tool, or simply present — never a
+  misleading "idle." (Non-hive work still can't be attributed to a named instance,
+  since Claude Code gives MCP servers no session id to correlate with the hooks
+  that see edits/turns; the board's mirrored plans and the activity graphs cover
+  overall busyness.)
+
 ## [0.8.0] — 2026-06-25
 
 ### Added
